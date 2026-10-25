@@ -3,8 +3,8 @@
   Tiny Wheel Stunt Track — OBS browser source
   ------------------------------------------------
   A tiny pixel-art wheel races an endless stunt track along the bottom of the source: ramps, loops and boost
-  pads, plus pinball bumpers, flippers and drop targets, slot machines, roulette loops, and dice and chip
-  stacks to hop. When people chat, their own wheels roll by in their chat color, with little pixel speech
+  pads, roller-coaster lifts and dips, plus pinball bumpers, flippers and drop targets, slot machines,
+  roulette loops, and dice and chip stacks to spring over, in front of an old-time circus and a Vegas skyline. When people chat, their own wheels roll by in their chat color, with little pixel speech
   bubbles (and sometimes crash into a die and blow up).
 
   OBS: Add > Browser, URL https://race.ixitxachitl.com/, at your canvas size (e.g. 1920x1080). The track
@@ -39,6 +39,7 @@
     speed     game speed multiplier (default 1)
     crashes   0 = chat wheels never crash into the dice and chip stacks
     decor     0 = no floating decorations behind the track
+    scenery   0 = no circus and Vegas skyline in the background
     bg      testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
 
   The broadcaster's own messages come from the main wheel, which takes on their chat color.
@@ -183,6 +184,7 @@
     { k: 'speed', label: 'Speed ×', type: 'num', def: 1, min: 0.1, max: 5, step: 0.1 },
     { k: 'crashes', label: 'Chat wheels can crash', type: 'bool', def: true, help: 'Now and then one hits a die or a chip stack and blows up. Yours never does, and nobody crashes mid-message.' },
     { k: 'decor', label: 'Floating decorations', type: 'bool', def: true, help: 'Dice, chips, coins and card suits drifting behind the track.' },
+    { k: 'scenery', label: 'Circus & Vegas scenery', type: 'bool', def: true, help: 'Little circus tents, booths, clowns and a circus train, with Vegas hotels behind.' },
   ];
   const FIELD = Object.fromEntries(FIELDS.filter(f => f.k).map(f => [f.k, f]));
   function coerce(f, v) {
@@ -221,7 +223,8 @@
 
   // The canvas fills the whole source (at least `rows` tall) with the track along its bottom, so wheels
   // can fly up above the strip without being cut off.
-  const cvs = document.getElementById('c'), ctx = cvs.getContext('2d');
+  const cvs = document.getElementById('c');
+  let ctx = cvs.getContext('2d');   // (bake() points it at an offscreen canvas for a moment)
   const rowsFor = () => Math.max(ROWS, Math.ceil(innerHeight / SCALE));
   let W = 0, H = rowsFor(), BASE = H - 8, ready = false;
   function resize() {
@@ -238,6 +241,21 @@
   const ri  = (a, b) => Math.floor(rnd(a, b + 1));
   const pick = a => a[(Math.random() * a.length) | 0];
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const smooth = t => t * t * (3 - 2 * t);   // 0..1, easing in and out, so slopes start and end flat
+  // a color made lighter (f > 0, toward white) or darker (f < 0, toward black)
+  function shade(hex, f) {
+    const n = parseInt(hex.slice(1), 16), to = f > 0 ? 255 : 0, k = Math.abs(f);
+    const ch = s => Math.round(((n >> s) & 255) + (to - ((n >> s) & 255)) * k);
+    return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+  }
+  // Draws something once into a little offscreen canvas (px() and friends draw into it while fn runs), so
+  // scenery that never changes costs one drawImage a frame.
+  function bake(w, h, fn) {
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const main = ctx; ctx = c.getContext('2d');
+    try { fn(); } finally { ctx = main; }
+    return c;
+  }
 
   // ---------------- wheels + particles ----------------
   // The streamer's wheel (wh) sets the camera; chatters' wheels (riders) share the same track and physics.
@@ -320,7 +338,9 @@
   }
 
   function loop(o) {
-    boost(o.power); flat(o.run);
+    // (no pad when the wheel already has the speed, like at the bottom of a coaster drop)
+    if (o.power) boost(o.power);
+    if (o.run) flat(o.run);
     // off = 0: in and out at the same spot, so the loop is a true circle
     const R = o.R, off = 0;
     const p = push({ type: 'loop', len: R * 2 + off + 12, R, off });
@@ -396,10 +416,37 @@
     };
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5 };
-  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets };
+  // A roller-coaster run: a chain lift hauls wheels up at a steady crawl, then dips and a drop back
+  // down. The drop's speed can carry a wheel round a loop at the bottom with no boost pad.
+  const CHAIN = 45;
+  function coaster(o) {
+    const { Hc, dips, D } = o, L = Math.round(Hc * 2.6), Ld = Math.round(Hc * 1.7);
+    const lift = push({ type: 'lift', len: L }); lift.chain = CHAIN;
+    lift.g = x => BASE - Hc * smooth((x - lift.x0) / L);
+    for (let i = 0; i < dips; i++) {
+      const d = push({ type: 'dip', len: 40 });
+      d.g = x => BASE - Hc + D * Math.sin(Math.PI * (x - d.x0) / 40) ** 2;
+    }
+    const drop = push({ type: 'drop', len: Ld });
+    drop.g = x => BASE - Hc * (1 - smooth((x - drop.x0) / Ld));
+    if (o.loopR) { flat(4); loop({ R: o.loopR }); }
+  }
+
+  // A row of dominoes: the first wheel to roll into it tips the first one over, and the rest go down one
+  // after another ahead of it. They stand back up a few seconds after the last one falls.
+  function dominoes() {
+    const n = ri(9, 15), p = push({ type: 'dominoes', len: 20 + n * 4 + 12 }); p.g = () => BASE;
+    p.ds = Array.from({ length: n }, (_, i) => p.x0 + 14 + i * 4);
+    p.start = -1; p.trig = p.ds[0] - RW;
+    p.onTrig = () => { if (!SIM && p.start < 0) p.start = simT; };
+  }
+
+  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5 };
+  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets, coaster, dominoes };
   // pieces that throw wheels into the air get a longer flat after them to land on
-  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard']);
+  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster']);
+  // loops fit within the strip (`rows`), whatever the size of the source
+  const MAX_R = Math.max(14, Math.min(21, Math.floor((ROWS - 12) / 2)));
 
   // The ways to build each kind of piece, the most natural first. The first one the ghost gets through
   // is kept, so a boost pad only turns up when the jump or loop really needs one, and only as strong as
@@ -414,14 +461,20 @@
       return [{ gap }, { gap, power: 140 }, { gap, power: 180 }, { gap: 26 }];
     }
     if (k === 'loop') {
-      // going round needs about √(5.6·g·r) at the bottom; start from that and go up
-      const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), need = Math.ceil(Math.sqrt(5.6 * G * (R - RW)) / 10) * 10;
-      return [0, 10, 20, 40].map(d => ({ R, run: ri(6, 14), power: Math.min(200, need + d) })).concat({ R: 14, run: 6, power: 200 });
+      // going round needs about √(5.6·g·r) at the bottom: no pad if it's already going that fast,
+      // otherwise start from that and go up
+      const R = ri(14, MAX_R), need = Math.ceil(Math.sqrt(5.6 * G * (R - RW)) / 10) * 10;
+      return [{ R }, ...[0, 10, 20, 40].map(d => ({ R, run: ri(6, 14), power: Math.min(200, need + d) })), { R: 14, run: 6, power: 200 }];
+    }
+    if (k === 'coaster') {
+      // as high as fits in the strip, with a loop at the bottom of the drop when the drop is fast enough
+      const Hc = ri(18, Math.max(18, Math.min(34, ROWS - 26))), dips = ri(1, 3), D = ri(6, 12);
+      return [{ Hc, dips, D, loopR: ri(14, MAX_R) }, { Hc, dips, D, loopR: 14 }, { Hc, dips, D }, { Hc: 18, dips: 1, D: 6 }];
     }
     if (k === 'hazard') {
       const die = Math.random() < 0.5, n = ri(3, 5);
       const look = die ? { kind: 'die', hw: 7, hh: 7, face: ri(1, 6) }
-        : { kind: 'chips', hw: 8, hh: n * 2, n, cols: Array.from({ length: n }, () => pick(CHIP_COLS)) };
+        : { kind: 'chips', hw: 8, hh: n * 2 + 1, n, cols: Array.from({ length: n }, () => pick(CHIP_COLS)) };
       // spring hard enough to rise well above it, set back so the arc peaks over it at the ghost's speed
       const power = Math.sqrt(2 * G * (look.hh + 9)), at = (vy, f = 1) => Math.round(ghost.v * vy / G * f);
       return [1, 0.85, 1.15].map(f => ({ look, power, dist: at(power, f) })).concat({ look, power: power + 30, dist: at(power + 30) });
@@ -482,7 +535,7 @@
   // the source got taller or shorter: the track moves to its new bottom, and everything on it moves along
   function shiftDown(dy) {
     for (const w of [wh, ghost, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
-    for (const q of [...parts, ...pops, ...rings, ...DECOR]) q.y += dy;
+    for (const q of [...parts, ...pops, ...rings, ...DECOR, ...smoke]) q.y += dy;
   }
 
   // Coming up short on a gap. A jump the ghost comes up short on isn't kept, so this is only ever a chat
@@ -542,6 +595,8 @@
         w.v += (cruise - w.v) * dt * grip * (w.v > cruise ? 0.6 : 1.2);
       }
       w.v = w.main ? Math.min(200, Math.max(35, w.v)) : Math.min(RUSH_OUT, Math.max(0, w.v));
+      const on = pieceAt(w.x);
+      if (on && on.chain) w.v = on.chain;   // a chain lift hauls everything up at its own pace
       const px = w.x;
       w.x += w.v * cs * dt; w.rot += w.v * dt / RW;
 
@@ -662,7 +717,24 @@
         for (let i = 0; i < e; i++) px(sx + 2 + (i & 1) * (w - 5), BASE - 2 - i, C.coil);
         ctx.fillStyle = C.pad; ctx.fillRect(sx, BASE - 3 - e, w, 1);
         ctx.fillStyle = C.padDark; ctx.fillRect(sx, BASE - 2 - e, w, 1);
+      } else if (p.type === 'lift') {
+        // the chain: dark links creeping up the lift
+        for (let wx = Math.ceil(p.x0); wx < p.x1; wx++)
+          if ((((wx - t * p.chain) % 4) + 4) % 4 < 1) px(wx - cx, Math.round(p.g(wx)) + 1, '#3a2030');
+      } else if (p.type === 'dominoes') {
+        // each tips over a moment after the one before, coming to rest leaning on the next; the last lies flat
+        const n = p.ds.length;
+        p.ds.forEach((dx0, i) => {
+          const f = p.start < 0 ? 0 : clamp((simT - p.start - i * 0.06) / 0.12, 0, 1);
+          const a = f * (i === n - 1 ? 1.5 : 0.95), ca = Math.cos(a), sa = Math.sin(a), sx = dx0 - cx;
+          for (let s = 0; s < 7; s++) {
+            const xx = Math.round(sx + sa * s), yy = Math.round(BASE - 1 - ca * s);
+            px(xx, yy, s === 1 || s === 3 || s === 5 ? '#1f1830' : '#fffaf0');
+            px(xx + 1, yy, '#bdb6d0');
+          }
+        });
       } else if (p.type === 'loop') {
+        if (p.roulette) drawRoulette(p.ex - cx, BASE - p.R, Math.max(4, p.R - 2 * RW - 1), t);
         const cols = [C.top, C.body, C.dark, C.shade];
         const steps = Math.ceil(2 * Math.PI * (p.R + 3) * 1.6);
         for (let k = 3; k >= 0; k--) {
@@ -682,13 +754,21 @@
       } else if (p.type === 'hazard') {
         const x = p.hx - Math.floor(p.hw / 2) - cx;
         if (p.kind === 'die') drawDie(x, BASE - 7, p.face);
-        else p.cols.forEach(([main, dark], i) => {
-          const y = BASE - 2 * (i + 1);
-          for (let j = 0; j < p.hw; j++) {
-            px(x + j, y, j === 1 || j === 4 || j === 6 ? '#f4f0ff' : main);   // the white edge dashes
-            px(x + j, y + 1, dark);
-          }
-        });
+        else {
+          // poker chips side-on: each a short cylinder lit from the front left, darker round the sides, with
+          // white inlays in its edge, and the top chip's face catching the light
+          const SH = [-0.5, -0.15, 0.12, 0.28, 0.22, 0.05, -0.2, -0.5];
+          p.cols.forEach(([main], i) => {
+            const y = BASE - 2 - 2 * i;
+            for (let j = 0; j < p.hw; j++) {
+              const inlay = j === 2 || j === 5;
+              px(x + j, y, shade(inlay ? '#f4f0ff' : main, SH[j]));
+              px(x + j, y + 1, shade(inlay ? '#cfc8e0' : main, SH[j] - 0.25));
+            }
+          });
+          const face = p.cols[p.n - 1][0];
+          for (let j = 1; j < p.hw - 1; j++) px(x + j, BASE - 1 - 2 * p.n, shade(face, j === 1 || j === p.hw - 2 ? 0.15 : 0.4));
+        }
       } else if (p.type === 'bumper') {
         // a mushroom cap: red rim, white band, red top; flashes yellow when hit
         const lit = p.lit > 0, bx = p.bx - cx, by = BASE - 5;
@@ -741,25 +821,66 @@
   function sprite(rows, x, y) {
     rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') px(x + i, y + j, SPR_C[row[i]]); });
   }
+  // A slot machine up on two chrome legs over the track: a lit 777 topper, chasing bulbs (faster after a
+  // jackpot), three reels shaded to look curved behind the glass with a payline, buttons, a coin slot, a
+  // coin tray and a lever that's pulled while the reels spin.
   function drawSlots(p, cx, t) {
-    const x = p.cx - cx, top = BASE - 30, spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
-    // legs and cabinet, arched over the track
-    ctx.fillStyle = '#7a2c0a'; ctx.fillRect(x - 12, top, 2, 30); ctx.fillRect(x + 11, top, 2, 30);
-    ctx.fillStyle = '#c4203e'; ctx.fillRect(x - 12, top, 25, 17);
-    ctx.fillStyle = '#ffd84a'; ctx.fillRect(x - 12, top + 16, 25, 1); ctx.fillRect(x - 12, top, 1, 17); ctx.fillRect(x + 12, top, 1, 17);
-    // chasing marquee lights, faster after a jackpot
-    for (let i = 0; i < 12; i++) px(x - 11 + i * 2, top + 1, ((i + Math.floor(t * (hot ? 16 : 5))) % 3) ? '#ffd84a' : '#fff');
-    // the window and its three reels
-    ctx.fillStyle = '#fffaf0'; ctx.fillRect(x - 9, top + 4, 19, 8);
+    const x = p.cx - cx, top = BASE - 44, spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
+    const chase = Math.floor(t * (hot ? 16 : 5));
+    const rect = (c, a, b, w, h) => { ctx.fillStyle = c; ctx.fillRect(x + a, top + b, w, h); };
+    for (const lx of [-15, 13]) { rect('#d8d8e8', lx, 28, 1, 16); rect('#8a8aa0', lx + 1, 28, 1, 16); }
+    // the cabinet, lit from the left, with chrome trim
+    rect('#c4203e', -15, 8, 31, 20); rect('#e04a5e', -15, 8, 2, 20); rect('#8e1530', 14, 8, 2, 20);
+    rect('#d8d8e8', -15, 8, 31, 1); rect('#8a8aa0', -15, 27, 31, 1);
+    // the topper
+    rect('#e8a020', -11, 0, 23, 1); rect('#e8a020', -12, 1, 25, 7); rect('#ffd84a', -11, 1, 23, 6);
+    drawText('777', x, top + 1, '#e8344e');
+    for (let i = 0; i < 12; i++) px(x - 11 + i * 2, top, (i + chase) % 3 ? '#fff3a8' : '#fff');
+    for (let j = 0; j < 6; j++) {
+      const on = (j + chase) & 1;
+      px(x - 15, top + 10 + j * 3, on ? '#fff3a8' : '#ffd84a'); px(x + 15, top + 10 + j * 3, on ? '#ffd84a' : '#fff3a8');
+    }
+    // the reels
+    rect('#2a2236', -12, 10, 25, 9);
+    const REEL = ['#bdb4a0', '#e2dac6', '#fffaf0', '#fffaf0', '#fffaf0', '#e2dac6', '#bdb4a0'];
     p.reels.forEach((r, i) => {
-      const rx = x - 8 + i * 6, s = r.until > simT ? SYMS[Math.floor(t * 14 + i * 2) % SYMS.length] : SYMS[r.s];
-      sprite(SPR[s], rx, top + 5);
-      if (r.until > simT) { ctx.fillStyle = 'rgba(255,250,240,0.5)'; ctx.fillRect(rx, top + 5 + (Math.floor(t * 30) % 5), 5, 1); }
+      const rx = -11 + i * 8, spin = r.until > simT;
+      REEL.forEach((c, j) => rect(c, rx, 11 + j, 7, 1));
+      const s = spin ? SYMS[Math.floor(t * 14 + i * 2) % SYMS.length] : SYMS[r.s];
+      sprite(SPR[s], x + rx + 1, top + 12 + (spin ? (Math.floor(t * 40) % 3) - 1 : 0));
+      if (spin) { ctx.fillStyle = 'rgba(255,250,240,0.55)'; ctx.fillRect(x + rx, top + 11 + (Math.floor(t * 30) % 7), 7, 1); }
     });
-    if (hot && Math.floor(t * 6) & 1) { ctx.fillStyle = 'rgba(255,216,74,0.35)'; ctx.fillRect(x - 9, top + 4, 19, 8); }
-    // the lever, pulled while the reels spin
-    ctx.fillStyle = '#c9c8d8'; ctx.fillRect(x + 13, spinning ? top + 8 : top + 4, 1, spinning ? 4 : 8);
-    px(x + 13, spinning ? top + 7 : top + 3, '#ff3b5c'); px(x + 14, spinning ? top + 7 : top + 3, '#ff3b5c');
+    rect('#ff3b5c', -13, 14, 1, 1); rect('#ff3b5c', 13, 14, 1, 1);   // the payline
+    if (hot && chase & 1) { ctx.fillStyle = 'rgba(255,216,74,0.35)'; ctx.fillRect(x - 12, top + 10, 25, 9); }
+    // buttons, coin slot and tray (fuller after a jackpot)
+    for (const [c, bx] of [['#ff3b5c', -9], ['#ffd84a', -4], ['#2fd06a', 1]]) { rect(c, bx, 20, 3, 2); rect('#fff', bx, 20, 1, 1); }
+    rect('#d8d8e8', 7, 20, 1, 2); rect('#1f1830', 8, 20, 1, 2);
+    rect('#1f1830', -8, 23, 17, 3); rect('#8a8aa0', -8, 26, 17, 1);
+    for (let i = 0; i < (hot ? 7 : 2); i++) px(x - 6 + i * 2, top + 25, '#ffd84a');
+    // the lever
+    const kn = spinning ? 16 : 8;
+    rect('#d8d8e8', 16, kn + 2, 1, 21 - kn); rect('#8a8aa0', 16, 21, 2, 2);
+    rect('#ff3b5c', 16, kn, 2, 2); px(x + 16, top + kn, '#ffb3c1');
+  }
+
+  // The spinning wheel inside a roulette loop: red, black and one green pocket round a wooden bowl with a
+  // gold turret, and the ball running round the other way.
+  function drawRoulette(x0, y0, rd, t) {
+    const rot = t * 1.3;
+    for (let dy = -rd; dy <= rd; dy++) for (let dx = -rd; dx <= rd; dx++) {
+      const d = Math.hypot(dx, dy);
+      if (d > rd + 0.3) continue;
+      let c;
+      if (d > rd - 1.6) {
+        const seg = Math.floor(((((Math.atan2(dy, dx) + rot) / (2 * Math.PI)) % 1) + 1) % 1 * 18);
+        c = seg === 0 ? '#1fae5b' : seg & 1 ? '#231c30' : '#d8283e';
+      } else if (d > rd - 2.6) c = '#e8b84a';
+      else if (d > 2.2) c = d > rd - 4 ? '#5a3018' : '#7a4424';
+      else c = d < 1 ? '#fff3a8' : '#ffd84a';
+      px(x0 + dx, y0 + dy, c);
+    }
+    const ba = -t * 2.6;
+    px(Math.round(x0 + Math.cos(ba) * (rd - 2)), Math.round(y0 + Math.sin(ba) * (rd - 2)), '#fff');
   }
 
   // spinning discs: poker chips (main, edge, middle colors) and coins, squashed sideways as they turn
@@ -799,6 +920,270 @@
         if (s > 0.35) for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) px(x + a, y + b, '#fff3a8');
         if (s > 0.8) for (const [a, b] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) px(x + a, y + b, 'rgba(255,243,168,0.5)');
       } else sprite(SPR[d.kind], x - 2, y - 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------- background scenery ----------------
+  // Two layers behind the track, scrolling slower than it: a Vegas skyline far back, and an old-time circus
+  // nearer, with tents, game booths, ticket stands and snack carts, clowns and people strolling about, and
+  // now and then a circus train with its cage wagons. Everything stands just behind the track's surface, so
+  // it all shows above it. Each building, tent and wagon is drawn once into its own little canvas (see bake()).
+  const LAYERS = [
+    { par: 0.12, alpha: 0.45, items: [], next: -40, make: skylineItem },
+    { par: 0.3, alpha: 0.72, items: [], next: -40, make: circusItem, walkers: [] },
+  ];
+  const CIRCUS = LAYERS[1];
+  function fillLayer(L) {
+    const off = camX * L.par;
+    while (L.items.length && L.items[0].x + L.items[0].w < off - 60) L.items.shift();
+    while (L.next < off + W + 60) { const it = L.make(L.next); L.items.push(it); L.next = it.x + it.w + it.gap; }
+  }
+
+  // ---- Vegas: hotel towers with lit windows and neon, a glass pyramid with its beam, an observation tower ----
+  const HOTEL_BODY = ['#2c2650', '#35295e', '#24304f', '#3a2448', '#2a3a5a'];
+  let PYRAMID = null, TOWER = null;
+  function skylineItem(x) {
+    const r = Math.random();
+    if (r < 0.07) return { x, w: 31, gap: ri(4, 12), kind: 'pyramid', img: PYRAMID ??= bakePyramid() };
+    if (r < 0.1) return { x, w: 9, gap: ri(4, 12), kind: 'tower', img: TOWER ??= bakeTower() };
+    const w = ri(10, 20), h = ri(20, 44), body = pick(HOTEL_BODY), lit = pick(['#ffe9a0', '#fff3d0', '#bfe8ff']);
+    const crown = Math.random() < 0.5, img = bake(w, h, () => {
+      const c0 = crown ? 3 : 0;
+      ctx.fillStyle = body; ctx.fillRect(0, c0, w, h - c0);
+      if (crown) { ctx.fillRect(2, 1, w - 4, 2); px(Math.floor(w / 2), 0, '#8a84a8'); }
+      ctx.fillStyle = shade(body, 0.15); ctx.fillRect(0, c0, 1, h - c0);
+      ctx.fillStyle = shade(body, -0.3); ctx.fillRect(w - 1, c0, 1, h - c0);
+      for (let j = c0 + 2; j < h - 1; j += 2) for (let i = 1; i < w - 1; i += 2) px(i, j, Math.random() < 0.5 ? lit : shade(body, -0.25));
+    });
+    const neon = Math.random() < 0.4 ? { c: pick(['#ff3bd0', '#3ff8ff', '#ffe600']), x: ri(1, w - 3), h: Math.round(h * 0.4) } : null;
+    return { x, w, gap: ri(0, 5), kind: 'hotel', img, neon };
+  }
+  function bakePyramid() {
+    return bake(31, 22, () => {
+      for (let j = 0; j < 22; j++) {
+        const hw = j * 0.7 + 0.5;
+        for (let dx = -15; dx <= 15; dx++) {
+          if (Math.abs(dx) > hw) continue;
+          const edge = Math.abs(dx) > hw - 1;
+          px(15 + dx, j, edge ? '#9fb0ff' : j % 3 === 0 ? '#4a5090' : dx < 0 ? '#3a3f70' : '#2a2d55');
+        }
+      }
+    });
+  }
+  function bakeTower() {
+    return bake(9, 56, () => {
+      ctx.fillStyle = '#8a84a8'; ctx.fillRect(4, 0, 1, 8);
+      ctx.fillStyle = '#4a4670'; ctx.fillRect(1, 8, 7, 6); ctx.fillRect(0, 9, 9, 4);
+      for (let i = 1; i < 9; i += 2) px(i, 10, '#ffe9a0');
+      ctx.fillStyle = '#3a3450'; ctx.fillRect(3, 14, 3, 42); ctx.fillRect(2, 46, 5, 10);
+      ctx.fillStyle = '#4a4670'; ctx.fillRect(3, 14, 1, 42);
+    });
+  }
+
+  // ---- the circus: striped tents, game booths, ticket stands, snack carts ----
+  const TENT_COLS = [['#d8283e', '#f4ece0'], ['#2f6bff', '#f4ece0'], ['#ffb000', '#d8283e'], ['#22b35e', '#f4ece0'], ['#8a5cff', '#ffd84a']];
+  // A tent: a canopy of stripes fanning out from the peak, a scalloped eave, striped walls and a doorway;
+  // the right side in shadow. The pole on top gets a waving pennant when drawn.
+  function bakeTent(W2, cr, wr, [A, B]) {
+    const w = W2 * 2 + 1, h = 4 + cr + 1 + wr;
+    return bake(w, h, () => {
+      ctx.fillStyle = '#c9c8d8'; ctx.fillRect(W2, 0, 1, 4);
+      for (let j = 0; j < cr; j++) {
+        const hw = 1 + (W2 - 1) * (j + 1) / cr;
+        for (let dx = -Math.floor(hw); dx <= hw; dx++) {
+          const c = Math.floor((dx / (hw + 0.01)) * 4 + 4) & 1 ? A : B;
+          px(W2 + dx, 4 + j, dx > 0 ? shade(c, -0.2) : c);
+        }
+      }
+      for (let dx = -W2; dx <= W2; dx++) if ((dx + 99) % 3) px(W2 + dx, 4 + cr, dx > 0 ? shade(A, -0.2) : A);
+      const top = 5 + cr;
+      for (let j = 0; j < wr; j++) for (let dx = -(W2 - 2); dx <= W2 - 2; dx++) {
+        const c = Math.floor((dx + 99) / 2) & 1 ? A : B;
+        px(W2 + dx, top + j, dx > 0 ? shade(c, -0.25) : shade(c, -0.08));
+      }
+      const door = Math.max(2, Math.floor(wr * 0.6));
+      ctx.fillStyle = '#ffd84a'; ctx.fillRect(W2 - 3, h - door - 1, 7, door + 1);
+      ctx.fillStyle = '#2a1a20'; ctx.fillRect(W2 - 2, h - door, 5, door);
+    });
+  }
+  function bakeBooth() {
+    const [A, B] = pick(TENT_COLS), prizes = ['#ff3bd0', '#3ff8ff', '#ffe600', '#2fd06a', '#ff8a20'];
+    return bake(16, 14, () => {
+      for (let i = 0; i < 16; i++) { ctx.fillStyle = (i >> 1) & 1 ? A : B; ctx.fillRect(i, 0, 1, 3); if (i % 3) px(i, 3, A); }
+      ctx.fillStyle = '#8a5a30'; ctx.fillRect(0, 3, 1, 11); ctx.fillRect(15, 3, 1, 11);
+      ctx.fillStyle = '#3a2a40'; ctx.fillRect(1, 4, 14, 6);
+      // prizes on two shelves: little plush toys, or bottles for ring toss
+      const bottles = Math.random() < 0.4;
+      for (let i = 2; i < 14; i += 3) {
+        if (bottles) { px(i, 8, '#2fd06a'); px(i, 9, '#2fd06a'); px(i, 7, '#c9f0d0'); }
+        else { ctx.fillStyle = pick(prizes); ctx.fillRect(i, 5, 2, 2); ctx.fillStyle = pick(prizes); ctx.fillRect(i, 8, 2, 2); }
+      }
+      ctx.fillStyle = '#d8b080'; ctx.fillRect(0, 10, 16, 1);
+      ctx.fillStyle = '#a87850'; ctx.fillRect(0, 11, 16, 1);
+      for (let i = 0; i < 16; i++) { ctx.fillStyle = (i >> 1) & 1 ? '#2f6bff' : '#ffd84a'; ctx.fillRect(i, 12, 1, 2); }
+    });
+  }
+  function bakeTicket() {
+    return bake(8, 13, () => {
+      for (let i = 0; i < 8; i++) { ctx.fillStyle = i & 1 ? '#d8283e' : '#f4ece0'; ctx.fillRect(i, i === 0 || i === 7 ? 2 : i === 1 || i === 6 ? 1 : 0, 1, 3 - (i === 0 || i === 7 ? 2 : i === 1 || i === 6 ? 1 : 0)); }
+      ctx.fillStyle = '#c4203e'; ctx.fillRect(0, 3, 8, 10);
+      ctx.fillStyle = '#ffd84a'; ctx.fillRect(0, 3, 8, 1); ctx.fillRect(0, 12, 8, 1);
+      ctx.fillStyle = '#fff3a8'; ctx.fillRect(2, 5, 4, 3);
+      ctx.fillStyle = '#8e1530'; ctx.fillRect(7, 4, 1, 8);
+    });
+  }
+  function bakeCart() {
+    const [A, B] = pick(TENT_COLS), goods = pick(['#ffb3d9', '#fff3d0', '#ff8a20']);
+    return bake(9, 12, () => {
+      for (let i = 0; i < 9; i++) { ctx.fillStyle = (i >> 1) & 1 ? A : B; ctx.fillRect(i, i === 0 || i === 8 ? 1 : 0, 1, i === 0 || i === 8 ? 1 : 2); }
+      ctx.fillStyle = '#c9c8d8'; ctx.fillRect(4, 2, 1, 4);
+      ctx.fillStyle = goods; ctx.fillRect(2, 5, 5, 2);
+      ctx.fillStyle = A; ctx.fillRect(1, 7, 7, 3);
+      ctx.fillStyle = shade(A, -0.3); ctx.fillRect(6, 7, 2, 3);
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(1, 10, 2, 2); ctx.fillRect(6, 10, 2, 2);
+    });
+  }
+  function circusItem(x) {
+    const r = Math.random();
+    let it;
+    if (r < 0.1) it = { kind: 'tent', img: bakeTent(16, 10, 9, TENT_COLS[0]), flag: 16 };
+    else if (r < 0.36) { const w2 = ri(7, 9); it = { kind: 'tent', img: bakeTent(w2, 6, 5, pick(TENT_COLS)), flag: w2 }; }
+    else if (r < 0.66) it = { kind: 'booth', img: bakeBooth() };
+    else if (r < 0.82) it = { kind: 'ticket', img: bakeTicket() };
+    else it = { kind: 'cart', img: bakeCart() };
+    Object.assign(it, { x, w: it.img.width, gap: ri(10, 36) });
+    // a few people (and the odd clown) about the place
+    for (let n = ri(0, 2); n > 0; n--) CIRCUS.walkers.push({ x: x + rnd(-4, it.w + 4), vx: rnd(-7, 7), ph: rnd(0, 6),
+      clown: Math.random() < 0.25, skin: pick(['#f2c79c', '#d9a066', '#a86b3c', '#7a4a2a']),
+      shirt: pick(['#2f6bff', '#d8283e', '#22b35e', '#ffd84a', '#8a5cff', '#f4ece0', '#ff8a20']), pants: pick(['#2a2236', '#3a4a7a', '#5a3a2a']) });
+    return it;
+  }
+  function drawWalker(q, x, t) {
+    const y = BASE, step = Math.floor(t * 4 + q.ph) & 1;
+    if (q.clown) {
+      // a cone hat, red hair, a white face with a red nose, a two-tone suit and big shoes; bouncing about
+      const b = y - (Math.floor(t * 3 + q.ph) & 1);
+      px(x + 1, b - 7, '#ffd84a'); px(x, b - 6, '#ff3b5c'); px(x + 1, b - 6, '#fffaf0'); px(x + 2, b - 6, '#ff3b5c');
+      px(x + 1, b - 5, '#ff3b5c');
+      ctx.fillStyle = q.shirt; ctx.fillRect(x, b - 4, 3, 2); px(x + 1, b - 4, '#fffaf0');
+      px(x, b - 2, q.shirt); px(x + 2, b - 2, q.shirt);
+      px(x - (step ? 1 : 0), b - 1, '#d8283e'); px(x + 2 + (step ? 0 : 1), b - 1, '#d8283e');
+      return;
+    }
+    px(x + 1, y - 5, q.skin);
+    ctx.fillStyle = q.shirt; ctx.fillRect(x, y - 4, 3, 1); ctx.fillRect(x + 1, y - 3, 1, 1);
+    px(x, y - 3, q.skin); px(x + 2, y - 3, q.skin);
+    ctx.fillStyle = q.pants;
+    if (step) { ctx.fillRect(x, y - 2, 1, 2); ctx.fillRect(x + 2, y - 2, 1, 2); } else ctx.fillRect(x + 1, y - 2, 1, 2);
+  }
+
+  // ---- the circus train: a steam engine and cage wagons with a lion, a tiger, a bear, a monkey and an elephant ----
+  const ANIMALS = {
+    lion:     { rows: ['mm....', 'myyyyy', 'yyyyyy', '.y..y.'], c: { m: '#8a4a1a', y: '#e8b040' } },
+    tiger:    { rows: ['oo....', 'okokok', 'oooooo', '.o..o.'], c: { o: '#ff8a20', k: '#1f1830' } },
+    bear:     { rows: ['b.b...', 'bbbbbb', 'bbbbbb', '.b..b.'], c: { b: '#7a4a24' } },
+    monkey:   { rows: ['.bb.', 'bffb', '.bb.', 'b..b'], c: { b: '#8a5a30', f: '#e8c090' } },
+    elephant: { rows: ['..gggg..', '.gGgggg.', 'gggggggg', 'g.gggggg', 'g.gg..gg', '..gg..gg'], c: { g: '#9a9ab0', G: '#7a7a90' } },
+  };
+  const WAGONS = {};
+  function bakeWagon(kind) {
+    const a = ANIMALS[kind];
+    return bake(14, 11, () => {
+      const paint = (ox, oy) => a.rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') px(ox + i, oy + j, a.c[row[i]]); });
+      if (kind === 'elephant') {
+        // too big for a cage: it rides on a flatcar
+        paint(3, 1);
+        ctx.fillStyle = '#c4203e'; ctx.fillRect(0, 7, 14, 2); ctx.fillStyle = '#ffd84a'; ctx.fillRect(0, 7, 14, 1);
+      } else {
+        ctx.fillStyle = '#b8202e'; ctx.fillRect(0, 1, 14, 8);
+        ctx.fillStyle = '#2a1a20'; ctx.fillRect(1, 2, 12, 5);
+        paint(13 - a.rows[0].length - 2, 7 - a.rows.length);
+        ctx.fillStyle = '#d8c890'; for (let i = 2; i < 13; i += 2) ctx.fillRect(i, 2, 1, 5);
+        ctx.fillStyle = '#ffd84a'; ctx.fillRect(0, 0, 14, 1); ctx.fillRect(0, 7, 14, 1);
+        for (let i = 0; i < 14; i += 3) px(i, 1, '#ffd84a');
+      }
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 9, 2, 2); ctx.fillRect(10, 9, 2, 2);
+      px(2, 9, '#ffd84a'); px(10, 9, '#ffd84a');
+    });
+  }
+  let LOCO = null;
+  function bakeLoco() {
+    return bake(18, 12, () => {
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 0, 5, 1); ctx.fillRect(3, 1, 3, 2);   // smokestack
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 3, 10, 5);                           // boiler
+      ctx.fillStyle = '#4a4660'; ctx.fillRect(2, 3, 10, 1);
+      ctx.fillStyle = '#ffd84a'; ctx.fillRect(5, 3, 1, 5); ctx.fillRect(9, 3, 1, 5); ctx.fillRect(8, 2, 2, 1);
+      px(2, 5, '#fff3a8');                                                            // headlamp
+      ctx.fillStyle = '#c4203e'; ctx.fillRect(12, 1, 6, 7);                           // cab
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(11, 0, 7, 1);
+      ctx.fillStyle = '#fff3a8'; ctx.fillRect(13, 2, 3, 2);
+      ctx.fillStyle = '#c4203e'; ctx.fillRect(0, 8, 2, 1); ctx.fillRect(1, 9, 2, 1);  // cowcatcher
+      ctx.fillStyle = '#3a3450'; ctx.fillRect(2, 8, 16, 1);
+      for (const [wx, r] of [[3, 1], [8, 2], [13, 2]]) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const d = Math.hypot(dx, dy); if (d > r + 0.3) continue;
+        px(wx + dx, 10 - (r === 1 ? 0 : 1) + dy, d > r - 0.6 ? '#d8283e' : '#2a2236');
+      }
+    });
+  }
+  let train = null, trainAt = rnd(6, 16);
+  const smoke = [];
+  function updateTrain(dt, off) {
+    if (!train && simT > trainAt) {
+      const cars = [...Object.keys(ANIMALS)].sort(() => Math.random() - 0.5).slice(0, ri(3, 4));
+      train = { x: off - 18 - cars.length * 15, cars, puff: 0 };   // in from the left, steaming along to the right
+    }
+    if (!train) return;
+    train.x += 62 * dt;
+    if ((train.puff -= dt) < 0) { train.puff = 0.22; smoke.push({ x: train.x + cars0(train) + 4, y: BASE - 12, r: 1, l: 1.4 }); }
+    if (train.x - off > W + 10) { train = null; trainAt = simT + rnd(25, 55); }
+  }
+  const cars0 = tr => tr.cars.length * 15;   // the engine comes after its wagons
+  function drawTrain(off) {
+    // smoke puffs: little round clouds that grow and fade as they drift up
+    for (const q of smoke) {
+      ctx.globalAlpha = CIRCUS.alpha * Math.min(1, q.l) * 0.6; ctx.fillStyle = '#c9c8d8';
+      const x = Math.round(q.x - off), y = Math.round(q.y), s = Math.min(2, Math.round(q.r));
+      ctx.fillRect(x - s, y, s * 2 + 1, 1); ctx.fillRect(x, y - s, 1, s * 2 + 1);
+      if (s > 1) ctx.fillRect(x - 1, y - 1, 3, 3);
+    }
+    ctx.globalAlpha = CIRCUS.alpha;
+    if (!train) return;
+    let x = Math.round(train.x - off);
+    for (const kind of train.cars) { ctx.drawImage(WAGONS[kind] ??= bakeWagon(kind), x, BASE - 10); x += 15; }
+    ctx.drawImage(LOCO ??= bakeLoco(), x - 1, BASE - 11);
+  }
+
+  function drawScenery(t, dt) {
+    for (const L of LAYERS) {
+      fillLayer(L);
+      const off = camX * L.par;
+      ctx.globalAlpha = L.alpha;
+      for (const it of L.items) {
+        const sx = Math.round(it.x - off), top = BASE + 1 - it.img.height;
+        if (sx > W || sx + it.w < 0) continue;
+        ctx.drawImage(it.img, sx, top);
+        if (it.neon && Math.floor(t * 2 + it.x) % 3) { ctx.fillStyle = it.neon.c; ctx.fillRect(sx + it.neon.x, top + 4, 2, it.neon.h); }
+        if (it.kind === 'pyramid') { ctx.fillStyle = 'rgba(232,240,255,0.3)'; ctx.fillRect(sx + 15, top - 30, 1, 30); }
+        if (it.kind === 'tower' && Math.floor(t * 1.5) & 1) px(sx + 4, top, '#ff3b5c');
+        if (it.flag != null) {   // the pennant on the tent pole, flapping
+          const fx = sx + it.flag + 1, wave = Math.floor(t * 3 + it.x) & 1;
+          px(fx, top, '#ffd84a'); px(fx + 1, top + wave, '#ffd84a'); px(fx, top + 1, '#ffd84a');
+        }
+      }
+      if (L === CIRCUS) {
+        updateTrain(dt, off);
+        for (const q of smoke) { q.x -= 6 * dt; q.y -= 9 * dt; q.r += 1.6 * dt; q.l -= dt; }
+        for (let i = smoke.length - 1; i >= 0; i--) if (smoke[i].l <= 0) smoke.splice(i, 1);
+        drawTrain(off);
+        for (let i = L.walkers.length - 1; i >= 0; i--) {
+          const q = L.walkers[i];
+          q.x += q.vx * dt;
+          if (q.x - off < -20) { L.walkers.splice(i, 1); continue; }
+          const sx = Math.round(q.x - off);
+          if (sx > -4 && sx < W + 4) drawWalker(q, sx, t);
+        }
+      }
     }
     ctx.globalAlpha = 1;
   }
@@ -1100,6 +1485,11 @@
       if (p.lit) p.lit = Math.max(0, p.lit - dt * 3);
       if (p.up) p.up = Math.max(0, p.up - dt * 2.5);
       if (p.ts) for (const q of p.ts) if (q.down && simT - q.down > 3) q.down = 0;
+      if (p.ds && p.start >= 0) {   // dominoes: a score when the last one's down, then back up a few seconds later
+        const done = p.start + p.ds.length * 0.06 + 0.12;
+        if (!p.scored && simT >= done) { p.scored = true; popup(p.ds[p.ds.length - 1], BASE - 12, '+' + p.ds.length * 10, '#fffaf0'); }
+        if (simT > done + 4) { p.start = -1; p.scored = false; }
+      }
       if (p.payAt && simT >= p.payAt) {
         p.payAt = 0; p.won = simT;
         emit(p.cx, BASE - 24, 28, ['#ffd84a', '#fff3a8', '#e8a020'], 60, 120, 260, [0.6, 1.3]);
@@ -1135,6 +1525,7 @@
 
     const cx = Math.round(camX), t = now / 1000;
     ctx.clearRect(0, 0, W, H);
+    if (CFG.scenery) drawScenery(t, dt);
     if (CFG.decor) drawDecor(t);
     drawTrack(cx, t);
     for (const q of parts) px(Math.round(q.x) - cx, Math.round(q.y), q.c);
