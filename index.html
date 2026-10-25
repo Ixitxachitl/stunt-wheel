@@ -2,8 +2,10 @@
 <!--
   Tiny Wheel Stunt Track — OBS browser source
   ------------------------------------------------
-  A tiny pixel-art wheel races an endless stunt track along the bottom of the source. When people chat,
-  their own wheels roll by in their chat color, with little pixel speech bubbles.
+  A tiny pixel-art wheel races an endless stunt track along the bottom of the source: ramps, loops and boost
+  pads, plus pinball bumpers, flippers and drop targets, slot machines, roulette loops, and dice and chip
+  stacks to hop. When people chat, their own wheels roll by in their chat color, with little pixel speech
+  bubbles (and sometimes crash into a die and blow up).
 
   OBS: Add > Browser, URL https://race.ixitxachitl.com/, at your canvas size (e.g. 1920x1080). The track
        sits along the bottom edge, and the background is transparent inside OBS automatically.
@@ -34,7 +36,9 @@
     scale     pixel size (default 4; bigger = chunkier pixels)
     rows      height of the strip in art pixels (default 72; the strip is rows × scale tall)
     speed     game speed multiplier (default 1)
-    bg        testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
+    crashes   0 = chat wheels never crash into the dice and chip stacks
+    decor     0 = no floating decorations behind the track
+    bg      testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
 
   Custom integrations (Streamer.bot, etc.) can call window.race.say(name, text, { color }) and .clear().
 -->
@@ -174,6 +178,8 @@
     { k: 'scale', label: 'Pixel size', type: 'num', def: 4, min: 1, max: 12, step: 1, help: 'Bigger = chunkier pixels and a bigger wheel.' },
     { k: 'rows', label: 'Track height (rows)', type: 'num', def: 72, min: 40, max: 200, step: 1, help: 'The strip is rows × pixel size tall on screen.' },
     { k: 'speed', label: 'Speed ×', type: 'num', def: 1, min: 0.1, max: 5, step: 0.1 },
+    { k: 'crashes', label: 'Chat wheels can crash', type: 'bool', def: true, help: 'Now and then one hits a die or a chip stack and blows up. Yours never does, and nobody crashes mid-message.' },
+    { k: 'decor', label: 'Floating decorations', type: 'bool', def: true, help: 'Dice, chips, coins and card suits drifting behind the track.' },
   ];
   const FIELD = Object.fromEntries(FIELDS.filter(f => f.k).map(f => [f.k, f]));
   function coerce(f, v) {
@@ -232,6 +238,10 @@
   const wh = wheel(20, CRUISE, MAIN_PAL);
   const riders = [];
   const parts = [];
+  const rings = [];   // explosion shock rings
+  const pops = [];    // floating pixel text: scores, BOOM, JACKPOT
+  function popup(x, y, text, c) { pops.push({ x, y, text, c, l: 1.2 }); }
+  let simT = 0;       // seconds of game time, for the machines' timers
   function emit(x, y, n, cols, spdX, up, grav = 200, life = [0.3, 0.8], dir = 0) {
     for (let i = 0; i < n; i++) parts.push({
       x, y, vx: dir ? dir * rnd(spdX * 0.3, spdX) : rnd(-spdX, spdX), vy: -rnd(0, up),
@@ -288,21 +298,83 @@
     const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), off = 12;
     const p = push({ type: 'loop', len: R * 2 + off + 12, R, off });
     p.g = () => BASE; p.ex = p.x0 + R + 4; p.trig = p.ex;
+    p.roulette = Math.random() < 0.5;   // half the loops are roulette wheels
     p.onTrig = w => {
       w.mode = 'loop'; w.loop = p; w.th = 0;
       w.v0 = Math.max(w.v, Math.sqrt(5.4 * G * (R - RW)));
     };
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, boost: 1, bounce: 2, bumps: 2 };
-  const MAKE = { hill, jump, loop, boost, bounce, bumps };
+  // ---- casino & pinball pieces ----
+  // Dice and chip stacks sit on the track to be hopped (see hazards()).
+  const CHIP_COLS = [['#e8344e', '#a3203a'], ['#2f6bff', '#1d43a8'], ['#22b35e', '#147a3e'], ['#8a5cff', '#5a3aad'], ['#3a3450', '#1f1a2e']];
+  function hazard() {
+    const p = push({ type: 'hazard', len: 130 }); p.g = () => BASE;
+    p.hx = p.x0 + 92;   // a long run-up, so wheels are on the ground when they decide to hop it
+    if (Math.random() < 0.5) { p.kind = 'die'; p.hw = 7; p.hh = 7; p.face = ri(1, 6); }
+    else { p.kind = 'chips'; p.hw = 8; p.n = ri(3, 5); p.hh = p.n * 2; p.cols = Array.from({ length: p.n }, () => pick(CHIP_COLS)); }
+  }
+
+  // A pinball pop bumper: anything that rolls into it gets kicked up into the air.
+  function bumper() {
+    const p = push({ type: 'bumper', len: ri(60, 80) }); p.g = () => BASE;
+    p.bx = p.x0 + 30; p.lit = 0;
+    p.touch = p.bx - 4 - RW;
+    p.onTouch = w => {
+      p.lit = 1;
+      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -rnd(120, 150); w.gvy = null;
+      emit(p.bx, BASE - 5, 12, ['#ffe600', '#fff', '#ff3b5c'], 60, 60, 120);
+      popup(p.bx, BASE - 14, '+' + pick([100, 250, 500]), '#ffe600');
+    };
+  }
+
+  // Three drop targets in a row that wheels knock flat; they pop back up a few seconds later.
+  const TARGET_COLS = ['#ff3bd0', '#3ff8ff', '#ffe600'];
+  function targets() {
+    const p = push({ type: 'targets', len: 60 }); p.g = () => BASE;
+    p.ts = TARGET_COLS.map((c, i) => ({ x: p.x0 + 24 + i * 6, c, down: 0 }));
+  }
+
+  // A pinball flipper at the edge of a gap swats wheels over to the other side.
+  function flipper() {
+    const lead = 20, gap = ri(26, 46);
+    const p = push({ type: 'flipper', len: lead + 16 }); p.g = () => BASE;
+    p.fx = p.x0 + lead; p.trig = p.fx + 12; p.up = 0;
+    p.onTrig = w => {
+      p.up = 1;
+      const vy = rnd(190, 230), t = 2 * vy / G;
+      w.mode = 'air'; w.vy = -vy; w.vx = Math.max(w.v, (4 + gap + 10) / t); w.gvy = null;   // always clears the gap
+      emit(p.fx + 12, BASE - 3, 8, ['#fff', '#ff3b5c'], 40, 50, 150);
+    };
+    const gp = push({ type: 'gap', len: gap }); gp.g = () => null;
+  }
+
+  // A slot machine arched over the track: a wheel rolling through spins the reels, and sometimes it's 7-7-7.
+  const SYMS = ['seven', 'cherry', 'bell', 'diamond'];
+  function slots() {
+    const p = push({ type: 'slots', len: 64 }); p.g = () => BASE;
+    p.cx = p.x0 + 32; p.trig = p.cx; p.payAt = 0; p.won = -9;
+    p.reels = [0, 1, 2].map(() => ({ s: ri(0, SYMS.length - 1), until: 0 }));
+    p.onTrig = () => {
+      if (p.reels.some(r => r.until > simT)) return;   // still spinning
+      const jackpot = Math.random() < 0.18;
+      p.reels.forEach((r, i) => { r.until = simT + 0.5 + i * 0.35; r.s = jackpot ? 0 : ri(0, SYMS.length - 1); });
+      if (!jackpot && p.reels.every(r => r.s === 0)) p.reels[2].s = 1;   // 7-7-7 only when it's meant to be
+      if (jackpot) p.payAt = p.reels[2].until;
+    };
+  }
+
+  const WEIGHT = { hill: 3, jump: 4, loop: 2, boost: 1, bounce: 1.5, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5 };
+  const MAKE = { hill, jump, loop, boost, bounce, bumps, hazard, bumper, flipper, slots, targets };
+  // pieces that throw wheels into the air get a long flat after them to land on
+  const AIRY = new Set(['jump', 'bounce', 'bumper', 'flipper']);
   function gen() {
     while (genX < camX + W + 200) {
       const ks = Object.keys(WEIGHT).filter(k => k !== lastType);
       let r = Math.random() * ks.reduce((a, k) => a + WEIGHT[k], 0), k;
       for (k of ks) { r -= WEIGHT[k]; if (r <= 0) break; }
       lastType = k; MAKE[k]();
-      flat(k === 'jump' || k === 'bounce' ? ri(50, 80) : ri(16, 46));
+      flat(AIRY.has(k) ? ri(50, 80) : ri(16, 46));
     }
   }
 
@@ -336,6 +408,13 @@
   }
 
   function step(w, dt) {
+    if (w.deadUntil) return;   // blown up, waiting to get back on the track
+    const x0 = w.x;
+    move(w, dt);
+    hazards(w, x0);
+  }
+
+  function move(w, dt) {
     if (w.boostT > 0) w.boostT -= dt;
 
     if (w.mode === 'ground') {
@@ -356,6 +435,8 @@
       for (const p of pieces) {
         if (p.launch && px < p.x1 && w.x >= p.x1) { launchRamp(w, p); return; }
         if (p.trig != null && px < p.trig && w.x >= p.trig) { p.onTrig(w); if (w.mode !== 'ground') return; }
+        if (p.touch != null && px < p.touch && w.x >= p.touch) { p.onTouch(w); return; }
+        if (p.ts) for (const t of p.ts) if (!t.down && px < t.x - RW + 1 && w.x >= t.x - RW + 1) knock(p, t);
       }
       const ng = groundAt(w.x);
       if (ng == null) { w.mode = 'air'; w.vx = w.v * cs; w.vy = w.v * sn; return; }
@@ -384,6 +465,50 @@
       w.x = cx + Math.sin(w.th) * rr;
       w.y = BASE - p.R + Math.cos(w.th) * rr;
     }
+  }
+
+  function knock(p, t) {
+    t.down = simT;
+    emit(t.x + 1, BASE - 4, 6, [t.c, '#fff'], 40, 40, 160);
+    if (p.ts.every(q => q.down)) popup(p.ts[1].x + 1, BASE - 12, 'BONUS', '#ffe600');
+    else popup(t.x + 1, BASE - 10, '+50', t.c);
+  }
+
+  // Dice and chip stacks. On the way up to one, a wheel decides whether to hop it, timed so it's at the top
+  // of the hop right over it. The streamer's wheel and chat wheels that are parked to talk always hop; a
+  // chat wheel on its way in or out sometimes doesn't, and blows up.
+  // (likelier on the way out, where it's the end of its visit anyway, than on the way in, where it holds up the message)
+  const CRASH = CFG.crashes ? { in: 0.25, out: 0.6 } : { in: 0, out: 0 };
+  function hazards(w, x0) {
+    for (const p of pieces) {
+      if (p.type !== 'hazard' || p.x1 < x0 - 20 || p.x0 > w.x + 140) continue;
+      const hop = Math.sqrt(2 * G * (p.hh + 5)), lead = p.hx - p.hw / 2 - w.v * hop / G;
+      if (w.mode === 'ground' && w.hopped !== p && w.doomed !== p && x0 < lead && w.x >= lead) {
+        if (w === wh || w.phase === 'talk' || Math.random() >= CRASH[w.phase]) { hopOver(w, p, hop); return; }
+        w.doomed = p;
+      }
+      if (w.hopped === p || Math.abs(w.x - p.hx) >= p.hw / 2 + RW - 1 || w.y + RW <= BASE - p.hh) continue;
+      if (w.doomed === p && w.phase !== 'talk') { explode(w); return; }
+      w.doomed = null;
+      hopOver(w, p, hop); return;   // came in late (say, off a landing), or parked since deciding: hop now
+    }
+  }
+  function hopOver(w, p, hop) {
+    w.hopped = p; w.mode = 'air'; w.vx = Math.max(w.v, 45); w.vy = -hop; w.gvy = null;
+    emit(w.x, w.y + RW, 4, ['#e8d9b0', '#fff'], 20, 20, 150);
+  }
+
+  // Sparks in the wheel's color, smoke, a shock ring and a BOOM. On its way out that's the end of it; on its
+  // way in it gets back on the track from the left a moment later, so its message still gets said.
+  function explode(r) {
+    const c = r.pal.main;
+    emit(r.x, r.y, 30, [c, c, '#ffde59', '#ff8a00', '#fff'], 95, 130, 260, [0.4, 1.1]);
+    emit(r.x, r.y, 10, ['#6a6488', '#4a4660', '#8a84a8'], 25, 25, -40, [0.6, 1.3]);
+    rings.push({ x: r.x, y: r.y, r: 1, l: 0.35 });
+    popup(r.x, r.y - 9, 'BOOM', '#ffde59');
+    r.doomed = null;
+    if (r.phase === 'out') removeRider(r);
+    else r.deadUntil = performance.now() + 1400;
   }
 
   // ---------------- drawing ----------------
@@ -425,11 +550,152 @@
           for (let i = 0; i <= steps; i++) {
             const th = i / steps * Math.PI * 2;
             const ccx = p.ex + p.off * th / (Math.PI * 2);
-            px(Math.round(ccx + Math.sin(th) * rr) - cx, Math.round(BASE - p.R + Math.cos(th) * rr), cols[k]);
+            let c = cols[k];
+            // a roulette wheel: gold rims round a slowly turning ring of red and black, with one green zero
+            if (p.roulette) {
+              const seg = Math.floor((((th + t * 0.5) / (2 * Math.PI)) % 1) * 18);
+              c = k === 0 || k === 3 ? (k ? '#b8862a' : '#ffd84a') : seg === 0 ? '#1fae5b' : seg & 1 ? '#2a2236' : '#e8344e';
+            }
+            px(Math.round(ccx + Math.sin(th) * rr) - cx, Math.round(BASE - p.R + Math.cos(th) * rr), c);
           }
         }
-      }
+      } else if (p.type === 'hazard') {
+        const x = p.hx - Math.floor(p.hw / 2) - cx;
+        if (p.kind === 'die') drawDie(x, BASE - 7, p.face);
+        else p.cols.forEach(([main, dark], i) => {
+          const y = BASE - 2 * (i + 1);
+          for (let j = 0; j < p.hw; j++) {
+            px(x + j, y, j === 1 || j === 4 || j === 6 ? '#f4f0ff' : main);   // the white edge dashes
+            px(x + j, y + 1, dark);
+          }
+        });
+      } else if (p.type === 'bumper') {
+        // a mushroom cap: red rim, white band, red top; flashes yellow when hit
+        const lit = p.lit > 0, bx = p.bx - cx, by = BASE - 5;
+        for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+          const d = Math.hypot(dx, dy);
+          if (d > 4.4) continue;
+          px(bx + dx, by + dy, d > 3.2 ? (lit ? '#ffe600' : '#ff3b5c') : d > 2 ? '#fffaf0' : lit ? '#fff' : '#ff3b5c');
+        }
+        ctx.fillStyle = '#4a4660'; ctx.fillRect(bx - 2, BASE - 1, 5, 1);
+      } else if (p.type === 'targets') {
+        for (const q of p.ts) {
+          ctx.fillStyle = q.c;
+          if (q.down) ctx.fillRect(q.x - cx - 1, BASE - 1, 4, 1);
+          else { ctx.fillRect(q.x - cx, BASE - 6, 2, 6); px(q.x - cx, BASE - 6, '#fff'); }
+        }
+      } else if (p.type === 'flipper') {
+        // a paddle from its pivot, resting just above the track, tip a little up, until it swats up
+        const a = -0.12 - p.up * 0.8, fx = p.fx - cx, fy = BASE - 3;
+        for (let s = 0; s <= 14; s++) {
+          const x = Math.round(fx + Math.cos(a) * s), y = Math.round(fy + Math.sin(a) * s), th = Math.round(4 - 2 * s / 14);
+          ctx.fillStyle = '#ff3b5c'; ctx.fillRect(x, y - (th >> 1), 1, th);
+          px(x, y - (th >> 1), '#ffb3c1');
+        }
+        ctx.fillStyle = '#e9e6ff'; ctx.fillRect(fx - 1, fy - 1, 3, 3); px(fx, fy, '#6a6488');
+      } else if (p.type === 'slots') drawSlots(p, cx, t);
     }
+  }
+
+  // ---- casino & pinball art ----
+  const PIPS = { 1: [[3, 3]], 2: [[1, 1], [5, 5]], 3: [[1, 1], [3, 3], [5, 5]], 4: [[1, 1], [5, 1], [1, 5], [5, 5]],
+    5: [[1, 1], [5, 1], [3, 3], [1, 5], [5, 5]], 6: [[1, 1], [5, 1], [1, 3], [5, 3], [1, 5], [5, 5]] };
+  function drawDie(x, y, face) {
+    for (let j = 0; j < 7; j++) for (let i = 0; i < 7; i++) {
+      if ((i === 0 || i === 6) && (j === 0 || j === 6)) continue;
+      px(x + i, y + j, i === 6 || j === 6 ? '#c9c4dc' : '#fffaf0');
+    }
+    for (const [i, j] of PIPS[face]) px(x + i, y + j, face === 1 ? '#e8344e' : '#1f1830');
+  }
+  const SPR = {
+    seven:   ['rrrrr', '...r.', '..r..', '.r...', '.r...'],
+    cherry:  ['...g.', '..gg.', '.g..g', 'rr.rr', 'rr.rr'],
+    bell:    ['..y..', '.yyy.', '.yyy.', 'yyyyy', '..y..'],
+    diamond: ['..r..', '.rrr.', 'rrrrr', '.rrr.', '..r..'],
+    heart:   ['rr.rr', 'rrrrr', 'rrrrr', '.rrr.', '..r..'],
+    spade:   ['..w..', '.www.', 'wwwww', 'wwwww', '..w..', '.www.'],
+    ball:    ['.sss.', 'swsss', 'sssss', 'sssSs', '.SSS.'],
+  };
+  const SPR_C = { r: '#ff3b5c', w: '#f4f0ff', g: '#2fd06a', y: '#ffd84a', s: '#c9c8d8', S: '#8a8aa0' };
+  function sprite(rows, x, y) {
+    rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') px(x + i, y + j, SPR_C[row[i]]); });
+  }
+  function drawSlots(p, cx, t) {
+    const x = p.cx - cx, top = BASE - 30, spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
+    // legs and cabinet, arched over the track
+    ctx.fillStyle = '#7a2c0a'; ctx.fillRect(x - 12, top, 2, 30); ctx.fillRect(x + 11, top, 2, 30);
+    ctx.fillStyle = '#c4203e'; ctx.fillRect(x - 12, top, 25, 17);
+    ctx.fillStyle = '#ffd84a'; ctx.fillRect(x - 12, top + 16, 25, 1); ctx.fillRect(x - 12, top, 1, 17); ctx.fillRect(x + 12, top, 1, 17);
+    // chasing marquee lights, faster after a jackpot
+    for (let i = 0; i < 12; i++) px(x - 11 + i * 2, top + 1, ((i + Math.floor(t * (hot ? 16 : 5))) % 3) ? '#ffd84a' : '#fff');
+    // the window and its three reels
+    ctx.fillStyle = '#fffaf0'; ctx.fillRect(x - 9, top + 4, 19, 8);
+    p.reels.forEach((r, i) => {
+      const rx = x - 8 + i * 6, s = r.until > simT ? SYMS[Math.floor(t * 14 + i * 2) % SYMS.length] : SYMS[r.s];
+      sprite(SPR[s], rx, top + 5);
+      if (r.until > simT) { ctx.fillStyle = 'rgba(255,250,240,0.5)'; ctx.fillRect(rx, top + 5 + (Math.floor(t * 30) % 5), 5, 1); }
+    });
+    if (hot && Math.floor(t * 6) & 1) { ctx.fillStyle = 'rgba(255,216,74,0.35)'; ctx.fillRect(x - 9, top + 4, 19, 8); }
+    // the lever, pulled while the reels spin
+    ctx.fillStyle = '#c9c8d8'; ctx.fillRect(x + 13, spinning ? top + 8 : top + 4, 1, spinning ? 4 : 8);
+    px(x + 13, spinning ? top + 7 : top + 3, '#ff3b5c'); px(x + 14, spinning ? top + 7 : top + 3, '#ff3b5c');
+  }
+
+  // spinning discs: poker chips (main, edge, middle colors) and coins, squashed sideways as they turn
+  function drawDisc(cx, cy, r, sx, cols) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const e = (dx / (r * sx + 0.35)) ** 2 + (dy / (r + 0.35)) ** 2;
+      if (e > 1) continue;
+      px(cx + dx, cy + dy, e > 0.55 ? ((dx + dy) & 1 ? cols[1] : cols[0]) : e > 0.2 ? cols[0] : cols[2]);
+    }
+  }
+
+  // ---- floating decorations, drifting behind the track at different depths ----
+  const DECOR = [];
+  const DECOR_KINDS = ['die', 'chip', 'chip', 'coin', 'coin', 'heart', 'diamond', 'spade', 'seven', 'ball', 'star', 'star'];
+  function newDecor(d, sx) {
+    Object.assign(d, { kind: pick(DECOR_KINDS), y: rnd(3, Math.max(4, BASE - 34)), ph: rnd(0, 6.3), face: ri(1, 6), chip: pick(CHIP_COLS) });
+    d.x = sx + camX * d.par;
+  }
+  function placeDecor() {
+    const n = Math.ceil(W / 45);
+    while (DECOR.length < n) { const d = { par: rnd(0.2, 0.55) }; newDecor(d, rnd(0, W)); DECOR.push(d); }
+    DECOR.length = Math.min(DECOR.length, n);
+  }
+  function drawDecor(t) {
+    ctx.globalAlpha = 0.75;
+    for (const d of DECOR) {
+      let sx = d.x - camX * d.par;
+      if (sx < -10) { newDecor(d, W + rnd(5, 60)); sx = d.x - camX * d.par; }
+      const x = Math.round(sx), y = Math.round(d.y + Math.sin(t * 1.1 + d.ph) * 1.5), spin = Math.cos(t * 1.6 + d.ph);
+      if (d.kind === 'die') drawDie(x - 3, y - 3, 1 + (d.face + Math.floor(t / 0.9 + d.ph)) % 6);
+      else if (d.kind === 'chip') drawDisc(x, y, 3, Math.abs(spin), [d.chip[0], '#f4f0ff', d.chip[1]]);
+      else if (d.kind === 'coin') drawDisc(x, y, 2, Math.abs(spin), ['#ffd84a', '#e8a020', '#fff3a8']);
+      else if (d.kind === 'star') {
+        const s = (Math.sin(t * 2.5 + d.ph) + 1) / 2;
+        px(x, y, '#fff');
+        if (s > 0.35) for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) px(x + a, y + b, '#fff3a8');
+        if (s > 0.8) for (const [a, b] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) px(x + a, y + b, 'rgba(255,243,168,0.5)');
+      } else sprite(SPR[d.kind], x - 2, y - 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- pixel text (3 × 5 letters) for scores, BOOM and JACKPOT, with an ink outline ----
+  const FONT = {
+    0: '###|#.#|#.#|#.#|###', 1: '.#.|##.|.#.|.#.|###', 2: '###|..#|###|#..|###', 3: '###|..#|.##|..#|###',
+    4: '#.#|#.#|###|..#|..#', 5: '###|#..|###|..#|###', 6: '###|#..|###|#.#|###', 7: '###|..#|.#.|.#.|.#.',
+    8: '###|#.#|###|#.#|###', 9: '###|#.#|###|..#|###', '+': '...|.#.|###|.#.|...', '!': '.#.|.#.|.#.|...|.#.',
+    A: '.#.|#.#|###|#.#|#.#', B: '##.|#.#|##.|#.#|##.', C: '.##|#..|#..|#..|.##', J: '..#|..#|..#|#.#|.#.',
+    K: '#.#|#.#|##.|#.#|#.#', M: '#.#|###|###|#.#|#.#', N: '##.|#.#|#.#|#.#|#.#', O: '.#.|#.#|#.#|#.#|.#.',
+    P: '##.|#.#|##.|#..|#..', S: '.##|#..|.#.|..#|##.', T: '###|.#.|.#.|.#.|.#.', U: '#.#|#.#|#.#|#.#|###',
+  };
+  function drawText(str, x, y, c) {
+    const chars = [...str], x0 = Math.round(x - (chars.length * 4 - 1) / 2), y0 = Math.round(y);
+    for (const [col, off] of [['#1f1830', [[1, 0], [-1, 0], [0, 1], [0, -1]]], [c, [[0, 0]]]])
+      chars.forEach((ch, n) => (FONT[ch] || '').split('|').forEach((row, j) => {
+        for (let i = 0; i < 3; i++) if (row[i] === '#') for (const [a, b] of off) px(x0 + n * 4 + i + a, y0 + j + b, col);
+      }));
   }
 
   // At 9 px across, a hard-edged pixel circle looks boxy or diamond-shaped, so the edge pixels of the tire
@@ -564,6 +830,7 @@
   let camV = 0;
   function steerRiders(now) {
     for (const r of riders) {
+      if (r.deadUntil) continue;
       const err = slotX(r) - r.x;
       if (r.phase === 'in' && Math.abs(err) < 6) { r.phase = 'talk'; talk(r, r.msg); }
       if (r.phase === 'talk' && now > r.sayUntil) r.phase = 'out';
@@ -675,6 +942,8 @@
   wh.x = RW + 2;
   let camX = 0, last = performance.now();
   gen();
+  placeDecor();
+  addEventListener('resize', placeDecor);
 
   function frame(now) {
     const rdt = Math.min(0.05, (now - last) / 1000), dt = rdt * SPEED; last = now;
@@ -683,7 +952,27 @@
     const all = [...riders, wh];
     for (let i = 0; i < N; i++) for (const w of all) step(w, h);
 
-    for (const p of pieces) if (p.spring) p.spring = Math.max(0, p.spring - dt * 3);
+    simT += dt;
+    for (const p of pieces) {
+      if (p.spring) p.spring = Math.max(0, p.spring - dt * 3);
+      if (p.lit) p.lit = Math.max(0, p.lit - dt * 3);
+      if (p.up) p.up = Math.max(0, p.up - dt * 2.5);
+      if (p.ts) for (const q of p.ts) if (q.down && simT - q.down > 3) q.down = 0;
+      if (p.payAt && simT >= p.payAt) {
+        p.payAt = 0; p.won = simT;
+        emit(p.cx, BASE - 24, 28, ['#ffd84a', '#fff3a8', '#e8a020'], 60, 120, 260, [0.6, 1.3]);
+        popup(p.cx, BASE - 38, 'JACKPOT', '#ffd84a');
+      }
+    }
+    for (const q of pops) { q.y -= 12 * dt; q.l -= dt; }
+    for (let i = pops.length - 1; i >= 0; i--) if (pops[i].l <= 0) pops.splice(i, 1);
+    for (const q of rings) { q.r += 70 * dt; q.l -= dt; }
+    for (let i = rings.length - 1; i >= 0; i--) if (rings[i].l <= 0) rings.splice(i, 1);
+    // blown-up chat wheels get back on the track from the left
+    for (const r of riders) if (r.deadUntil && now >= r.deadUntil) {
+      let x = camX - RW - 3; while (groundAt(x) == null) x += 2;
+      Object.assign(r, { deadUntil: 0, x, y: groundAt(x) - RW, mode: 'ground', v: RUSH_IN, gvy: null, hopped: null, trail: [] });
+    }
     for (const w of all) {
       if (w.boostT > 0 && Math.random() < 0.7)
         emit(w.x - RW, w.y + RW - 1, 1, ['#ffde59', '#ff8a00', C.boostA], 60, 15, 120, [0.2, 0.45], -1);
@@ -699,15 +988,22 @@
     if (dt > 0) camV += ((camX - camWas) / dt - camV) * Math.min(1, dt * 4);   // how fast the view scrolls
     gen();
     pieces = pieces.filter(p => p.x1 > camX - 160);
-    for (const r of [...riders]) if (r.x > camX + W + RW + 2 || r.x < camX - 140) removeRider(r);
+    for (const r of [...riders]) if (!r.deadUntil && (r.x > camX + W + RW + 2 || r.x < camX - 140)) removeRider(r);
     spawnFromQueue(now);
 
-    const cx = Math.round(camX);
+    const cx = Math.round(camX), t = now / 1000;
     ctx.clearRect(0, 0, W, H);
-    drawTrack(cx, now / 1000);
+    if (CFG.decor) drawDecor(t);
+    drawTrack(cx, t);
     for (const q of parts) px(Math.round(q.x) - cx, Math.round(q.y), q.c);
-    for (const r of riders) drawWheel(r, cx);
+    for (const r of riders) if (!r.deadUntil) drawWheel(r, cx);
     drawWheel(wh, cx);
+    for (const q of rings) {
+      ctx.globalAlpha = Math.min(1, q.l / 0.2);
+      for (let i = 0; i < 24; i++) px(Math.round(q.x + Math.cos(i / 24 * 6.283) * q.r) - cx, Math.round(q.y + Math.sin(i / 24 * 6.283) * q.r), '#fff3a8');
+    }
+    for (const q of pops) { ctx.globalAlpha = Math.min(1, q.l / 0.4); drawText(q.text, q.x - cx, q.y, q.c); }
+    ctx.globalAlpha = 1;
     placeBubbles(camX, rdt, now);
     requestAnimationFrame(frame);
   }
