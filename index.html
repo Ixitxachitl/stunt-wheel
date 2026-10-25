@@ -52,6 +52,8 @@
     --vx:0 calc(-1 * var(--p)) 0 0 var(--ink),0 var(--p) 0 0 var(--ink),calc(-1 * var(--p)) 0 0 0 var(--ink),var(--p) 0 0 0 var(--ink);
     --lit:inset 0 4px 0 0 rgba(255,255,255,.55),inset 0 -5px 0 0 rgba(0,0,0,.2);
     --pix:'Press Start 2P',monospace;--txt:'Pixelify Sans',system-ui,sans-serif;--ts:15px}
+  /* Pixelify Sans's "fi" ligature looks like an "A" (set on everything, since the font shorthand resets it) */
+  *{font-variant-ligatures:none}
 
   /* ---------- speech bubbles, moved over their wheel every frame ---------- */
   @keyframes pop{from{scale:.3}to{scale:1}}
