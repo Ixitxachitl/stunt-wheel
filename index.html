@@ -485,14 +485,132 @@
     p.g = p.lanes[0]; p.mainLane = o.lane; p.frontLane = 1;
   }
   function split(o) {
-    const { L, A } = o, p = push({ type: 'split', len: L }), up = 36;
+    const { A } = o, up = rampFor(A), L = o.L + 2 * (up - 36), p = push({ type: 'split', len: L });
     p.lanes = [() => BASE, x => { const u = x - p.x0; return BASE - A * smooth(clamp(Math.min(u, L - u) / up, 0, 1)); }];
-    p.g = p.lanes[0]; p.mainLane = o.lane;
+    p.g = p.lanes[0]; p.mainLane = o.lane; p.ramp = up; p.A = A;   // (its deck hangs from a suspension bridge)
+  }
+
+  // How long a ramp up to height h is: long enough that a wheel coming over the top at speed stays on it
+  // rather than hopping off the crest.
+  const rampFor = h => Math.max(36, Math.round(h * 2.4));
+  // An upper deck to branch off onto: like a split's upper lane, it ramps up from the track and runs along
+  // at height to `xe`, where whatever's at the end of it takes over (girders or a funnel). Wheels on the
+  // lower lane carry straight on underneath. Returns the piece; lane 1 is the deck.
+  function deck(type, H, run, after) {
+    const ramp = rampFor(H), p = push({ type, len: ramp + run + after }), xs = p.x0 + ramp, xe = xs + run;
+    p.lanes = [() => BASE, x => x >= xe ? BASE : BASE - H * smooth(clamp((x - p.x0) / ramp, 0, 1))];
+    p.g = p.lanes[0]; p.xs = xs; p.xe = xe; p.top = BASE - H; p.A = H;
+    return p;
+  }
+
+  // Girders, Donkey Kong style, below the end of an upper deck: the wheel rolls off the deck's end round a
+  // banked hairpin onto a girder sloping back to the left, round another hairpin onto the next, sloping
+  // right, and down a curved ramp off the bottom one onto the track. The track can't be in two places at
+  // one x, so the girders are a path the wheels follow (see move()'s 'path' mode), keeping their speed
+  // and gaining more downhill.
+  const TIER = 11, TILT = 4;
+  function girders(o) {
+    const { w } = o, H = 2 * TIER + TILT + 13, p = deck('girders', H, w, 24), top = p.top, xe = p.xe, xl = xe - w + 2;
+    p.mainLane = o.lane;
+    const t1 = { xa: xl, xb: xe, ya: top + TIER + TILT, yb: top + TIER }, t2 = { xa: xl, xb: xe - 1, ya: top + 2 * TIER, yb: top + 2 * TIER + TILT };
+    const pts = [], turns = [];
+    // a hairpin: half an ellipse from (x, y0) down to (x, y1), bulging out sideways (dir) by rx
+    const hairpin = (x, y0, y1, dir, rx) => {
+      const cy = (y0 + y1) / 2, ry = (y1 - y0) / 2;
+      turns.push({ x, cy, rx, ry, dir });
+      for (let i = 0; i <= 12; i++) { const a = -Math.PI / 2 + Math.PI * i / 12; pts.push([x + dir * rx * Math.cos(a), cy + ry * Math.sin(a)]); }
+    };
+    hairpin(xe, top - RW, t1.yb - RW, 1, 6);
+    hairpin(xl, t1.ya - RW, t2.ya - RW, -1, 6);
+    // then along the bottom girder and down a curve that ends level with the track
+    const P0 = [t2.xb, t2.yb - RW], P3 = [xe + 20, BASE - RW], P1 = [P0[0] + 6, P0[1] + 2], P2 = [P3[0] - 9, P3[1]];
+    for (let i = 0; i <= 12; i++) {
+      const t = i / 12, u = 1 - t, b = (j) => u * u * u * P0[j] + 3 * u * u * t * P1[j] + 3 * u * t * t * P2[j] + t * t * t * P3[j];
+      pts.push([b(0), b(1)]);
+    }
+    let s = 0;
+    p.path = pts.map((q, i) => ({ x: q[0], y: q[1], s: i ? (s += Math.hypot(q[0] - pts[i - 1][0], q[1] - pts[i - 1][1])) : 0 }));
+    p.tiers = [t1, t2]; p.turns = turns; p.exit = p.path.slice(-13);
+    p.trig = xe; p.onTrig = wh => { if (laneOf(wh, p) === 1) { wh.mode = 'path'; wh.path = p; wh.s = 0; wh.v = Math.max(45, wh.v); } };
+  }
+
+  // A pinball slingshot kicker: hit it and it fires the wheel off at its angle: straight up, long and
+  // low, or back over its shoulder (it lands behind and rolls on).
+  const KICKS = { up: [0.5, 215], long: [1.35, 120], back: [-0.5, 200] };
+  function kicker(o) {
+    const p = push({ type: 'kicker', len: 50 }); p.g = () => BASE;
+    p.kx = p.x0 + 18; p.trig = p.kx - 2; p.dir = o.dir; p.lit = 0;
+    p.onTrig = w => {
+      const [fx, vy] = KICKS[p.dir];
+      w.mode = 'air'; w.vx = fx > 0 ? w.v * fx : Math.min(-40, w.v * fx); w.vy = -vyCap(w, vy); w.gvy = null;
+      if (!SIM) p.lit = 1;
+      emit(p.kx, BASE - 3, 10, ['#ffe600', '#fff', '#3ff8ff'], 50, 60, 150);
+      popup(p.kx, BASE - 12, '+' + pick([100, 200]), '#3ff8ff');
+    };
+  }
+
+  // A spring that launches wheels up into a cluster of pop bumpers floating over the track; they
+  // ricochet off them (see bounceOff) before coming down.
+  function pinfield(o) {
+    const p = push({ type: 'pinfield', len: o.len }); p.g = () => BASE;
+    p.sx = p.x0 + 12; p.trig = p.sx;
+    p.bs = o.bs.map(([dx, h, r]) => ({ x: p.x0 + dx, y: BASE - h, r, lit: 0 }));
+    p.onTrig = w => {
+      w.mode = 'air'; w.vx = Math.max(w.v, 70); w.vy = -vyCap(w, 230); w.gvy = null;
+      if (!SIM) p.spring = 1;
+      emit(p.sx, BASE - 2, 12, ['#ffef5a', '#fff', C.pad], 45, 70, 150);
+    };
+  }
+  function bounceOff(w, x0) {
+    for (const p of pieces) {
+      if (!p.bs || p.type !== 'pinfield' || p.x1 < x0 - 10 || p.x0 > w.x + 10) continue;
+      for (const b of p.bs) {
+        const dx = w.x - b.x, dy = w.y - b.y, d = Math.hypot(dx, dy);
+        if (d >= b.r + RW || d === 0) continue;
+        const nx = dx / d, ny = dy / d, vn = w.vx * nx + w.vy * ny;
+        if (vn >= 0) continue;
+        w.vx -= 2 * vn * nx; w.vy -= 2 * vn * ny;                       // bounce off its round face, with a kick
+        const sp = Math.hypot(w.vx, w.vy), k = Math.min(1.12, 260 / Math.max(1, sp)); w.vx *= k; w.vy *= k;
+        w.x = b.x + nx * (b.r + RW); w.y = b.y + ny * (b.r + RW);
+        if (w.vy < 0) w.vy = -vyCap(w, -w.vy);   // never out of the top
+        if (!SIM) b.lit = 1;
+        emit(b.x + nx * b.r, b.y + ny * b.r, 8, ['#ffe600', '#fff', '#ff3bd0'], 50, 50, 120);
+        popup(b.x, b.y - b.r - 4, '+' + pick([250, 500, 1000]), '#ffe600');
+      }
+    }
+  }
+
+  // A glass coin funnel at the end of an upper deck: the wheel rolls off the deck into its rim, spirals
+  // down inside, faster and tighter, and shoots out of the spout onto the track (see move()'s 'funnel'
+  // mode). Wheels on the lower lane pass underneath.
+  const FUNNEL_TIME = 2.4;
+  // the height of the funnel's middle k of the way down: its back rim is level with the deck
+  const funnelY = (p, k) => p.top + 0.3 * p.R + k * (p.H - 0.3 * p.R);
+  function funnel(o) {
+    const { H, R } = o, p = deck('funnel', H, 24 + R, R + 30);
+    p.mainLane = o.lane; p.fx = p.xe; p.R = R; p.H = H;
+    p.trig = p.xe; p.onTrig = w => { if (laneOf(w, p) === 1) { w.mode = 'funnel'; w.fun = p; w.th = -Math.PI / 2; w.k = 0; w.fv = w.v; } };
+  }
+
+  // Traffic cones that go flying when a wheel clips them (just for show: nobody's slowed down).
+  function cones(o) {
+    const p = push({ type: 'cones', len: 24 + o.n * 9 }); p.g = () => BASE;
+    p.cs = Array.from({ length: o.n }, (_, i) => ({ x: p.x0 + 14 + i * 9, hit: false }));
+  }
+  function hitCone(c, w) {
+    Object.assign(c, { hit: true, fx: c.x, fy: BASE - 4, vx: Math.max(40, w.v * 0.7) + rnd(0, 40), vy: -rnd(90, 150), rot: 0, spin: rnd(8, 16) });
+    emit(c.x, BASE - 3, 5, ['#ff7a1a', '#fff'], 30, 40, 160);
   }
   // which lane a wheel's on in a two-lane piece (picked the first time it's asked), and the ground under it
   function laneOf(w, p) {
     w.lanes ??= new Map();
-    if (!w.lanes.has(p)) { w.lanes.set(p, w.main ? p.mainLane : Math.random() < 0.5 ? 0 : 1); if (w.lanes.size > 40) w.lanes.delete(w.lanes.keys().next().value); }
+    if (!w.lanes.has(p)) {
+      let lane = w.main ? p.mainLane : Math.random() < 0.5 ? 0 : 1;
+      // one that turns up partway along (or in the air) takes whichever lane it's actually at
+      if (w.x > p.x0 + 2) { const y = w.y + RW; lane = Math.abs(p.lanes[1](w.x) - y) < Math.abs(p.lanes[0](w.x) - y) ? 1 : 0; }
+      w.lanes.set(p, lane);
+      if (w.lanes.size > 40) w.lanes.delete(w.lanes.keys().next().value);
+    }
     return w.lanes.get(p);
   }
   function groundFor(w, x) {
@@ -501,10 +619,11 @@
   }
 
   const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
-    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5 };
-  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split };
+    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5, girders: 1.5, kicker: 2, pinfield: 1.5, funnel: 1.2, cones: 1.5 };
+  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split,
+    girders, kicker, pinfield, funnel, cones };
   // pieces that throw wheels into the air get a longer flat after them to land on
-  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster']);
+  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster', 'kicker', 'pinfield', 'funnel', 'girders']);
   // loops fit within the strip (`rows`), whatever the size of the source
   const MAX_R = Math.max(14, Math.min(21, Math.floor((ROWS - 12) / 2)));
 
@@ -520,6 +639,18 @@
       const gap = ri(30, 60);
       return [{ gap }, { gap, power: 140 }, { gap, power: 180 }, { gap: 26 }];
     }
+    if (k === 'girders') { const w = ri(50, 70); return [{ w, lane: 1 }, { w, lane: 0 }]; }
+    if (k === 'kicker') { const dir = pick(Object.keys(KICKS)); return [{ dir }, { dir: 'up' }, { dir: 'long' }]; }
+    if (k === 'pinfield') {
+      // a few layouts of 3 or 4 bumpers floating where the spring throws the wheel
+      const layout = () => Array.from({ length: ri(3, 4) }, (_, i) => [34 + i * 13 + ri(-3, 3), ri(24, Math.min(44, ROWS - 26)), ri(3, 4)]);
+      return [{ len: 110, bs: layout() }, { len: 110, bs: layout() }, { len: 110, bs: layout() }];
+    }
+    if (k === 'funnel') {
+      const H = ri(26, Math.max(26, Math.min(36, ROWS - 30))), R = ri(14, 18);
+      return [{ H, R, lane: 1 }, { H: 26, R: 14, lane: 1 }, { H, R, lane: 0 }];
+    }
+    if (k === 'cones') return [{ n: ri(3, 6) }];
     if (k === 'loop') {
       // going round needs about √(5.6·g·r) at the bottom: no pad if it's already going that fast,
       // otherwise start from that and go up
@@ -553,7 +684,7 @@
   let SIM = false;   // true while a ghost rides (no sparks, scores or flashing machines)
   const STEP = 1 / 240;
   const ghost = Object.assign(wheel(RW + 2, CRUISE, MAIN_PAL), { main: true, ghost: true });
-  const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot'];
+  const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot', 'path', 's', 'fun', 'k', 'fv'];
   const stateOf = w => Object.fromEntries(STATE.map(k => [k, w[k]]));
   // Rides up to just short of the end of the track built so far (so it never sees past it, where the
   // ground isn't there yet). False if it falls, stalls in a loop or hits something on the way.
@@ -561,7 +692,7 @@
     for (let n = 0; w.x < genX - 2; n++) {
       if (n > 240 * 20) return false;
       step(w, STEP);
-      if (w.fell || w.stalled || w.crashed) return false;
+      if (w.fell || w.stalled || w.crashed || w.y < H - ROWS - 20) return false;   // (or thrown out of the top)
     }
     return true;
   }
@@ -570,9 +701,11 @@
     MAKE[k](o);
     flat(AIRY.has(k) ? ri(40, 60) : ri(16, 40));
     SIM = true;
-    // it has to work a little slower and a little faster too, for some room to spare
+    // it has to work a little slower and a little faster too, for some room to spare (except among the
+    // floating bumpers, where any difference sends a wheel somewhere else entirely; the streamer's wheel
+    // repeats the ghost exactly anyway)
     const twin = f => Object.assign(wheel(0, CRUISE, MAIN_PAL), s, { main: true, ghost: true, v: s.v * f, vx: s.vx * f });
-    let ok = ride(twin(0.95)) && ride(twin(1.05)) && ride(ghost);
+    let ok = (k === 'pinfield' || (ride(twin(0.95)) && ride(twin(1.05)))) && ride(ghost);
     // and the next piece only starts once it's back on solid track
     while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost); }
     SIM = false;
@@ -582,6 +715,7 @@
 
   function gen() {
     while (genX < camX + W + 200) {
+      if (genX < 40) { flat(40); SIM = true; ride(ghost); SIM = false; continue; }   // plain track where the wheels start
       const ks = Object.keys(WEIGHT).filter(k => k !== lastType);
       let r = Math.random() * ks.reduce((a, k) => a + WEIGHT[k], 0), k;
       for (k of ks) { r -= WEIGHT[k]; if (r <= 0) break; }
@@ -594,8 +728,8 @@
   function groundAt(x) { const p = pieceAt(x); return p ? p.g(x) : BASE; }
 
   // ---------------- physics ----------------
-  // never throw a wheel so high it goes off the top of the canvas (an upward speed, from where it is now)
-  const vyCap = (w, vy) => Math.min(vy, Math.sqrt(2 * G * Math.max(4, w.y - RW - 2)));
+  // never throw a wheel so high it goes off the top of the strip (an upward speed, from where it is now)
+  const vyCap = (w, vy) => Math.min(vy, Math.sqrt(2 * G * Math.max(4, w.y - Math.max(RW + 2, H - ROWS - 16))));
 
   // the source got taller or shorter: the track moves to its new bottom, and everything on it moves along
   function shiftDown(dy) {
@@ -670,6 +804,7 @@
         if (p.trig != null && px < p.trig && w.x >= p.trig) { p.onTrig(w); if (w.mode !== 'ground') return; }
         if (p.touch != null && px < p.touch && w.x >= p.touch) { p.onTouch(w); return; }
         if (p.ts && !SIM) for (const t of p.ts) if (!t.down && px < t.x - RW + 1 && w.x >= t.x - RW + 1) knock(p, t);
+        if (p.cs && !SIM) for (const c of p.cs) if (!c.hit && px < c.x - RW + 1 && w.x >= c.x - RW + 1) hitCone(c, w);
       }
       const ng = groundFor(w, w.x);
       if (ng == null) { w.mode = 'air'; w.vx = w.v * cs; w.vy = w.v * sn; return; }
@@ -683,6 +818,7 @@
     } else if (w.mode === 'air') {
       const ax = w.x;
       w.vy += G * dt; w.x += w.vx * dt; w.y += w.vy * dt; w.rot += w.vx * dt / RW;
+      bounceOff(w, ax);   // floating bumpers
       // a flipper swats anything that comes in low, rolling or not
       for (const p of pieces) if (p.type === 'flipper' && ax < p.trig && w.x >= p.trig && w.y + RW >= BASE - 5) { p.onTrig(w); return; }
       const gy = groundFor(w, w.x);
@@ -692,6 +828,27 @@
         else land(w, gy);
       }
       if (w.y > H + 40) respawn(w);
+
+    } else if (w.mode === 'path') {
+      // along the girders: gravity along the way it's heading speeds it up downhill, a little rolling drag
+      const P = w.path.path, at = s => { let j = 1; while (j < P.length - 1 && P[j].s < s) j++; return j; };
+      const i = at(w.s), a = P[i - 1], b = P[i], seg = Math.max(0.001, b.s - a.s);
+      w.v = clamp(w.v + G * 0.7 * (b.y - a.y) / seg * dt - w.v * 0.15 * dt, 40, 190);
+      w.s += w.v * dt; w.rot += w.v * dt / RW * (b.x >= a.x ? 1 : -1);
+      const end = P[P.length - 1];
+      if (w.s >= end.s) { w.mode = 'ground'; w.x = end.x; w.y = BASE - RW; w.v = Math.max(w.v, 60); w.gvy = null; return; }
+      const j = at(w.s), c = P[j - 1], d = P[j], f = (w.s - c.s) / Math.max(0.001, d.s - c.s);
+      w.x = c.x + (d.x - c.x) * f; w.y = c.y + (d.y - c.y) * f;
+
+    } else if (w.mode === 'funnel') {
+      // round and round, tighter and faster, down to the spout
+      // (it comes in at the speed it rolled off the deck, so there's no lurch, and picks up more on the way)
+      const p = w.fun, k = Math.min(1, (w.k += dt / FUNNEL_TIME)), r = p.R * (1 - k) + 1.5 * k;
+      w.v = Math.min(200, Math.max(60, w.fv) + 70 * k);
+      w.th += w.v / Math.max(r, 5) * dt;
+      w.x = p.fx + Math.cos(w.th) * r; w.y = funnelY(p, k) - RW + Math.sin(w.th) * r * 0.3;
+      w.rot += w.v * dt / RW;
+      if (k >= 1) { w.mode = 'ground'; w.x = Math.max(w.x, p.fx + 1); w.y = BASE - RW; w.gvy = null; }
 
     } else { // loop
       const p = w.loop, rr = p.R - RW;
@@ -818,6 +975,34 @@
             px(Math.round(ccx + Math.sin(th) * rr) - cx, Math.round(BASE - p.R + Math.cos(th) * rr), c);
           }
         }
+      } else if (p.type === 'kicker') {
+        // a pinball slingshot: a triangle of rubber on a post, leaning the way it kicks, lit when it fires
+        const kx = p.kx - cx, lit = p.lit > 0, back = p.dir === 'back', steep = p.dir === 'up';
+        const tip = back ? [kx - 4, BASE - 9] : steep ? [kx, BASE - 11] : [kx + 5, BASE - 6];
+        for (let i = 0; i <= 10; i++) {
+          const t = i / 10;
+          for (const [ax, ay] of [[kx - 4, BASE - 1], [kx + 4, BASE - 1]]) px(Math.round(ax + (tip[0] - ax) * t), Math.round(ay + (tip[1] - ay) * t), lit ? '#ffe600' : '#ff3b5c');
+        }
+        ctx.fillStyle = lit ? '#fff3a8' : '#2a2236'; ctx.fillRect(kx - 3, BASE - 3, 7, 2);
+        ctx.fillStyle = '#c9c8d8'; ctx.fillRect(kx - 4, BASE - 1, 9, 1);
+        px(tip[0], tip[1], '#3ff8ff');
+      } else if (p.type === 'pinfield') {
+        // its spring, and the bumpers floating above it
+        const sx = p.sx - cx, e = Math.round((p.spring || 0) * 6);
+        ctx.fillStyle = C.padDark; ctx.fillRect(sx - 4, BASE - 1, 9, 1);
+        for (let i = 0; i < e; i++) px(sx - 2 + (i & 1) * 4, BASE - 2 - i, C.coil);
+        ctx.fillStyle = C.pad; ctx.fillRect(sx - 4, BASE - 3 - e, 9, 1);
+        for (const b of p.bs) {
+          const bx = Math.round(b.x - cx), by = Math.round(b.y), lit = b.lit > 0;
+          for (let dy = -b.r - 1; dy <= b.r + 1; dy++) for (let dx = -b.r - 1; dx <= b.r + 1; dx++) {
+            const d = Math.hypot(dx, dy);
+            if (d > b.r + 0.6) continue;
+            px(bx + dx, by + dy, d > b.r - 0.8 ? (lit ? '#ffe600' : '#3ff8ff') : d > b.r - 2 ? '#fffaf0' : lit ? '#fff' : '#ff3bd0');
+          }
+          if (lit) for (let k = 0; k < 8; k++) { const a = k / 8 * 6.283; px(Math.round(bx + Math.cos(a) * (b.r + 2)), Math.round(by + Math.sin(a) * (b.r + 2)), '#fff3a8'); }
+        }
+      } else if (p.type === 'cones') {
+        for (const c of p.cs) if (!c.hit) drawCone(c.x - cx, BASE - 1, 0);
       } else if (p.type === 'hazard') {
         const x = p.hx - Math.floor(p.hw / 2) - cx;
         if (p.kind === 'die') drawDie(x, BASE - 7, p.face);
@@ -866,18 +1051,118 @@
   }
 
   // The second lane of a two-lane piece: a strip of track like the main one, drawn the whole way, so it
-  // peels smoothly off the main track at the fork and runs back into it where they join. A split's upper
-  // deck stands on lattice and posts down to the lower lane once there's room under it; a braid's front lane
-  // is drawn in front of the wheels, with only short brackets so it doesn't hide the lane behind it.
+  // peels smoothly off the main track at the fork and runs back into it where they join. Raised lanes stand
+  // on lattice and posts down to the lower lane where there's room under them, except a split's level deck,
+  // which hangs from a suspension bridge, and the part of a girder deck over its girders. A braid's front
+  // lane is drawn in front of the wheels, with only short brackets so it doesn't hide the lane behind it.
   function drawLane(p, cx, g, front) {
+    if (!front && p.type === 'split') drawSuspension(p, cx);   // (behind its deck)
+    const hung = x => p.type === 'split' && x > p.x0 + p.ramp && x < p.x1 - p.ramp, over = x => p.tiers && x >= p.xe - (p.xe - p.xs) && x <= p.xe;
     for (let wx = Math.max(Math.ceil(p.x0), cx); wx < Math.min(p.x1, cx + W); wx++) {
       const sx = wx - cx, y = Math.round(g(wx)), low = Math.round(p.lanes[0](wx));
-      if (!front && low - y > 5) {
+      if (!front && low - y > 5 && !hung(wx) && !over(wx)) {
         for (let yy = y + 4; yy < low; yy++) if (((wx + yy) & 1) === 0) px(sx, yy, C.lattice);
         if ((((wx % 16) + 16) % 16) === 0) { ctx.fillStyle = C.post; ctx.fillRect(sx, y + 4, 1, low - y - 4); }
       } else if (front && Math.abs(low - y) > 6 && (((wx % 20) + 20) % 20) === 0) { ctx.fillStyle = C.post; ctx.fillRect(sx, y + 4, 1, 3); }
       px(sx, y, C.top); px(sx, y + 1, C.body); px(sx, y + 2, C.dark); px(sx, y + 3, C.shade);
     }
+    if (front) return;
+    if (p.tiers) drawGirders(p, cx);
+    if (p.type === 'funnel') drawFunnel(p, cx, 'back');
+  }
+
+  // A suspension bridge for a split's upper deck: a tower standing on the ground where each end of the
+  // level deck begins, the main cable sagging between their tops with a hanger down to the deck every few
+  // pixels, and a backstay from each top down to a concrete anchor block on the ground outside it.
+  function drawSuspension(p, cx) {
+    const top = BASE - p.A, th = 14, xa = Math.round(p.x0 + p.ramp), xb = Math.round(p.x1 - p.ramp), ct = top - th + 1;
+    const line = (x0, y0, x1, y1, c) => {
+      const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+      for (let i = 0; i <= n; i++) px(Math.round(x0 + (x1 - x0) * i / n - cx), Math.round(y0 + (y1 - y0) * i / n), c);
+    };
+    for (const [tx, out] of [[xa, -1], [xb, 1]]) {
+      const ax = tx + out * 16;
+      line(tx, ct, ax, BASE - 4, '#e8e8f4');   // backstay
+      ctx.fillStyle = '#6a6478'; ctx.fillRect(ax - 3 - cx, BASE - 4, 7, 4); ctx.fillStyle = '#8a8498'; ctx.fillRect(ax - 3 - cx, BASE - 4, 7, 1);
+      const x = tx - cx;
+      ctx.fillStyle = '#c9c8d8'; ctx.fillRect(x - 2, top - th, 1, BASE - top + th); ctx.fillRect(x + 2, top - th, 1, BASE - top + th);
+      ctx.fillStyle = '#8a8aa0'; ctx.fillRect(x - 2, top - th, 5, 1); ctx.fillRect(x - 1, top - th + 5, 3, 1); ctx.fillRect(x - 1, top + 6, 3, 1);
+      ctx.fillStyle = '#5a5470'; ctx.fillRect(x - 3, BASE - 1, 7, 1);   // footing
+      px(x, top - th - 1, '#ff3b5c');   // aircraft light
+    }
+    for (let wx = xa + 1; wx < xb; wx++) {
+      const u = (wx - xa) / (xb - xa), cy = Math.round(ct + (th - 4) * 4 * u * (1 - u)), sx = wx - cx;
+      if (sx < -1 || sx > W) continue;
+      px(sx, cy, '#e8e8f4');
+      if ((wx - xa) % 4 === 0) { ctx.fillStyle = '#9a9ab4'; ctx.fillRect(sx, cy + 1, 1, top - cy - 1); }
+    }
+  }
+
+  // Donkey Kong girders: red I-beams riveted along their tops with criss-cross webs, cyan ladders between
+  // them, an iron column at each end of the stack holding them up, a banked steel guard round the outside
+  // of each hairpin, and a last curved beam down to the track.
+  function drawGirders(p, cx) {
+    const xl = p.tiers[0].xa, xr = p.xe;
+    for (const x of [xl - 2, xr + 1]) { ctx.fillStyle = '#7a2c3a'; ctx.fillRect(Math.round(x - cx), p.top + 4, 2, BASE - p.top - 4); }
+    for (const [lx, t] of [[xl + 10, 0], [xr - 12, 1]]) {   // ladders from each girder up to the one above
+      const a = p.tiers[t], yTop = t === 0 ? p.top + 3 : p.tiers[0].ya + 3, yBot = Math.round(a.ya + (a.yb - a.ya) * (lx - a.xa) / (a.xb - a.xa));
+      for (let y = yTop; y < yBot; y++) { px(lx - cx, y, '#3ff8ff'); px(lx + 3 - cx, y, '#3ff8ff'); if (y % 2 === 0) { px(lx + 1 - cx, y, '#3ff8ff'); px(lx + 2 - cx, y, '#3ff8ff'); } }
+    }
+    const beam = (sx, y, x) => {
+      px(sx, y, '#ff6a7a'); px(sx, y + 1, '#e8344e'); px(sx, y + 3, '#a3203a');
+      px(sx, y + 2, (x + Math.floor(x / 2)) % 3 === 0 ? '#e8344e' : '#3a1420');
+      if (x % 6 === 0) px(sx, y, '#ffd0d8');
+    };
+    for (const a of p.tiers) for (let x = a.xa; x <= a.xb; x++) beam(Math.round(x - cx), Math.round(a.ya + (a.yb - a.ya) * (x - a.xa) / Math.max(1, a.xb - a.xa)), x);
+    // the last beam follows the curve the wheels ride down (RW below their middles)
+    const E = p.exit;
+    for (let x = Math.ceil(E[0].x); x <= E[E.length - 1].x; x++) {
+      let j = 1; while (j < E.length - 1 && E[j].x < x) j++;
+      const a = E[j - 1], b = E[j], y = a.y + (b.y - a.y) * clamp((x - a.x) / Math.max(0.001, b.x - a.x), 0, 1) + RW;
+      beam(Math.round(x - cx), Math.round(y), x);
+    }
+    // hairpin guards: curved red beams just outside the wheels' way round, from level with the deck or
+    // girder above down to the one below, riveted, and braced back to the column
+    for (const t of p.turns) {
+      const rx = t.rx + RW, ry = t.ry + RW, a0 = -Math.asin(clamp(t.ry / ry, 0, 1));
+      for (let i = 0; i <= 32; i++) {
+        const a = a0 + (Math.PI / 2 - a0) * i / 32, x = Math.round(t.x + t.dir * rx * Math.cos(a) - cx), y = Math.round(t.cy + ry * Math.sin(a));
+        px(x, y, i % 5 === 0 ? '#ffd0d8' : '#e8344e'); px(x + t.dir, y, '#a3203a');
+      }
+      ctx.fillStyle = '#7a2c3a'; ctx.fillRect(Math.round(Math.min(t.x, t.x + t.dir * rx) - cx), Math.round(t.cy), Math.round(rx), 1);
+    }
+  }
+
+  // The glass funnel: its far side behind the wheels ('back'), its near side in front ('front'), each a set
+  // of half-rings narrowing down to the spout, with the rim and two outline edges.
+  function drawFunnel(p, cx, side) {
+    const fx = p.fx - cx, back = side === 'back', glass = back ? 'rgba(150,220,255,0.35)' : 'rgba(200,240,255,0.55)';
+    for (const k of [0, 0.25, 0.5, 0.75]) {
+      const r = p.R * (1 - k) + 1.5 * k, cy = funnelY(p, k), steps = Math.ceil(r * 4);
+      for (let i = 0; i <= steps; i++) {
+        const a = (back ? Math.PI : 0) + i / steps * Math.PI;
+        ctx.fillStyle = k === 0 ? (back ? '#a8d8f0' : '#e0f6ff') : glass;
+        ctx.fillRect(Math.round(fx + Math.cos(a) * r), Math.round(cy + Math.sin(a) * r * 0.3), 1, 1);
+      }
+    }
+    if (back) return;
+    for (const s of [-1, 1]) for (let i = 0; i <= p.H; i++) {
+      const k = i / p.H, r = p.R * (1 - k) + 1.5 * k;
+      ctx.fillStyle = 'rgba(220,245,255,0.8)'; ctx.fillRect(Math.round(fx + s * r), Math.round(funnelY(p, k)), 1, 1);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    for (let i = 2; i < p.H * 0.6; i += 3) ctx.fillRect(Math.round(fx - (p.R * (1 - i / p.H)) * 0.6), Math.round(funnelY(p, i / p.H)), 1, 2);   // a shine
+  }
+
+  // A traffic cone, standing (rot 0) or tumbling
+  const CONE = ['..o..', '..o..', '.www.', '.ooo.', 'wwwww', 'ooooo', 'kkkkkkk'];
+  function drawCone(x, y, rot) {
+    const ca = Math.cos(rot), sa = Math.sin(rot);
+    CONE.forEach((row, j) => { for (let i = 0; i < row.length; i++) {
+      if (row[i] === '.') continue;
+      const dx = i - (row.length - 1) / 2, dy = j - 6;
+      px(Math.round(x + dx * ca - dy * sa), Math.round(y + dx * sa + dy * ca), row[i] === 'o' ? '#ff7a1a' : row[i] === 'w' ? '#fffaf0' : '#2a2236');
+    } });
   }
 
   // An arch over the track: a half-ring with a straight leg down from each end to the track, made from one
@@ -1510,6 +1795,8 @@
         }
         ctx.globalAlpha = 1;
       } else if (p.lanes && p.frontLane != null) drawLane(p, cx, p.lanes[p.frontLane], true);
+      else if (p.type === 'funnel') drawFunnel(p, cx, 'front');
+      else if (p.cs) { for (const c of p.cs) if (c.hit && c.fy < H + 10) drawCone(c.fx - cx, c.fy, c.rot); }
       else if (p.type === 'pipe') {
         // a glass tube: tinted inside, bright rims top and bottom, a sheen, joints and flanged ends
         const a = Math.round(p.x0 - cx), b = Math.round(p.x1 - cx), top = BASE - 13;
@@ -2049,7 +2336,22 @@
 
   // Velvet ropes along the empty flat stretches, behind the track, like a theatre queue. Every flat spot
   // on the 12 px grid has a post, a brass one or a lamp post, and a rope only hangs between two of them.
+  // Now and then one to three balloons are tied to a brass post, bobbing on their strings.
   const ROPE_GAP = 12;
+  const BALLOONS = ['#ff3b5c', '#ffe600', '#3ff8ff', '#ff3bd0', '#7cff6a', '#ff9a1f', '#a77bff', '#fffaf0'];
+  function drawBalloons(wx, x, y) {
+    const h = Math.imul(wx | 0, 2654435761) >>> 0;
+    if (h % 5) return;
+    const n = 1 + (h >>> 4) % 3;
+    for (let i = 0; i < n; i++) {
+      const lean = (i - (n - 1) / 2) * 3, sway = Math.sin(simT * 1.6 + wx * 0.7 + i * 2.1) * 0.8;
+      const bx = Math.round(x + lean + sway), by = y - 13 - ((h >>> (8 + i * 3)) % 4) - (i === 1 ? 2 : 0), c = BALLOONS[(h >>> (12 + i * 4)) % BALLOONS.length];
+      for (let j = by + 4; j < y; j++) px(Math.round(x + (bx - x) * (y - j) / (y - by - 4)), j, 'rgba(255,255,255,0.45)');   // string
+      ctx.fillStyle = c; ctx.fillRect(bx - 1, by - 1, 3, 4); ctx.fillRect(bx - 2, by, 5, 2);
+      ctx.fillStyle = shade(c, -0.35); ctx.fillRect(bx - 1, by + 2, 3, 1); ctx.fillRect(bx + 1, by + 1, 1, 2);
+      px(bx - 1, by, shade(c, 0.6)); px(bx, by + 3, shade(c, -0.35));   // shine, and the knot
+    }
+  }
   function drawRopes(cx) {
     for (let wx = Math.ceil((cx - ROPE_GAP) / ROPE_GAP) * ROPE_GAP; wx < cx + W + ROPE_GAP; wx += ROPE_GAP) {
       if (!flatAt(wx)) continue;
@@ -2057,6 +2359,7 @@
       if (!lampAt(wx)) {
         ctx.fillStyle = '#b8902e'; ctx.fillRect(x - 1, y, 3, 1); ctx.fillRect(x, y - 5, 1, 5);
         px(x, y - 6, '#ffe08a'); px(x, y - 5, '#e8c060');
+        drawBalloons(wx, x, y - 5);
       }
       if (!flatAt(wx + ROPE_GAP) || !flatAt(wx + ROPE_GAP / 2)) continue;
       for (let i = 1; i < ROPE_GAP; i++) {
@@ -2365,6 +2668,8 @@
     for (const p of pieces) {
       if (p.spring) p.spring = Math.max(0, p.spring - dt * 3);
       if (p.lit) p.lit = Math.max(0, p.lit - dt * 3);
+      if (p.bs) for (const b of p.bs) if (b.lit) b.lit = Math.max(0, b.lit - dt * 3);
+      if (p.cs) for (const c of p.cs) if (c.hit && c.fy < H + 10) { c.vy += 300 * dt; c.fx += c.vx * dt; c.fy += c.vy * dt; c.rot += c.spin * dt; }
       if (p.up) p.up = Math.max(0, p.up - dt * 2.5);
       if (p.ts) for (const q of p.ts) if (q.down && simT - q.down > 3) q.down = 0;
       if (p.ds && p.start >= 0) {   // dominoes: a score when the last one's down, then back up a few seconds later
