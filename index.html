@@ -34,13 +34,16 @@
 
   Track:
     scale     pixel size (default 4; bigger = chunkier pixels)
-    rows      height of the strip in art pixels (default 72; the strip is rows × scale tall)
+    rows      least height of the canvas in art pixels (default 72). The canvas fills the source and the
+              track runs along its bottom, so a full-size source gives jumps room to fly.
     speed     game speed multiplier (default 1)
     crashes   0 = chat wheels never crash into the dice and chip stacks
     decor     0 = no floating decorations behind the track
     bg      testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
 
-  Custom integrations (Streamer.bot, etc.) can call window.race.say(name, text, { color }) and .clear().
+  The broadcaster's own messages come from the main wheel, which takes on their chat color.
+
+  Custom integrations (Streamer.bot, etc.) can call window.race.say(name, text, { color, owner }) and .clear().
 -->
 <html>
 <head>
@@ -214,12 +217,17 @@
     boostA:'#3ff8ff', boostB:'#1a5cff', pad:'#5dff6a', padDark:'#1f9e3a', coil:'#c8c8d8',
     shadow:'rgba(0,0,0,0.35)'
   };
-  const MAIN_PAL = { rim: '#9690be', spoke: '#e9e6ff', hub: '#ff4d6d', trailA: C.boostA, trailB: C.boostB };
+  const MAIN_PAL = { main: '#9690be', rim: '#9690be', spoke: '#e9e6ff', hub: '#ff4d6d', trailA: C.boostA, trailB: C.boostB };
 
+  // The canvas fills the whole source (at least `rows` tall) with the track along its bottom, so wheels
+  // can fly up above the strip without being cut off.
   const cvs = document.getElementById('c'), ctx = cvs.getContext('2d');
-  let W = 0; const H = ROWS, BASE = H - 8;
+  const rowsFor = () => Math.max(ROWS, Math.ceil(innerHeight / SCALE));
+  let W = 0, H = rowsFor(), BASE = H - 8, ready = false;
   function resize() {
     W = Math.ceil(innerWidth / SCALE);
+    const nh = rowsFor();
+    if (nh !== H) { const dy = nh - H; H = nh; BASE = H - 8; if (ready) shiftDown(dy); }
     cvs.width = W; cvs.height = H;
     cvs.style.width = W * SCALE + 'px'; cvs.style.height = H * SCALE + 'px';
     ctx.imageSmoothingEnabled = false;
@@ -278,7 +286,7 @@
     const p = push({ type: 'bounce', len: ri(120, 150) });
     p.g = () => BASE; p.pa = p.x0 + 12; p.pb = p.x0 + 22; p.trig = p.x0 + 17; p.spring = 0;
     p.onTrig = w => {
-      w.mode = 'air'; w.vx = w.v; w.vy = -rnd(160, 200); w.gvy = null; p.spring = 1;
+      w.mode = 'air'; w.vx = w.v; w.vy = -vyCap(w, rnd(160, 200)); w.gvy = null; p.spring = 1;
       emit(w.x, w.y + RW, 14, ['#ffef5a', '#fff', C.pad], 45, 70, 150, [0.4, 0.9]);
     };
   }
@@ -295,7 +303,8 @@
 
   function loop() {
     boost(); flat(ri(6, 14));
-    const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), off = 12;
+    // off = 0: in and out at the same spot, so the loop is a true circle
+    const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), off = 0;
     const p = push({ type: 'loop', len: R * 2 + off + 12, R, off });
     p.g = () => BASE; p.ex = p.x0 + R + 4; p.trig = p.ex;
     p.roulette = Math.random() < 0.5;   // half the loops are roulette wheels
@@ -322,7 +331,7 @@
     p.touch = p.bx - 4 - RW;
     p.onTouch = w => {
       p.lit = 1;
-      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -rnd(120, 150); w.gvy = null;
+      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -vyCap(w, rnd(120, 150)); w.gvy = null;
       emit(p.bx, BASE - 5, 12, ['#ffe600', '#fff', '#ff3b5c'], 60, 60, 120);
       popup(p.bx, BASE - 14, '+' + pick([100, 250, 500]), '#ffe600');
     };
@@ -335,16 +344,17 @@
     p.ts = TARGET_COLS.map((c, i) => ({ x: p.x0 + 24 + i * 6, c, down: 0 }));
   }
 
-  // A pinball flipper at the edge of a gap swats wheels over to the other side.
+  // A pinball flipper hinged on the edge of a gap, hanging down over it; when a wheel reaches the edge it
+  // swings up and swats the wheel across.
   function flipper() {
-    const lead = 20, gap = ri(26, 46);
-    const p = push({ type: 'flipper', len: lead + 16 }); p.g = () => BASE;
-    p.fx = p.x0 + lead; p.trig = p.fx + 12; p.up = 0;
+    const gap = ri(30, 48);
+    const p = push({ type: 'flipper', len: 36 }); p.g = () => BASE;
+    p.fx = p.x1; p.trig = p.x1 - 1; p.up = 0;
     p.onTrig = w => {
       p.up = 1;
-      const vy = rnd(190, 230), t = 2 * vy / G;
-      w.mode = 'air'; w.vy = -vy; w.vx = Math.max(w.v, (4 + gap + 10) / t); w.gvy = null;   // always clears the gap
-      emit(p.fx + 12, BASE - 3, 8, ['#fff', '#ff3b5c'], 40, 50, 150);
+      const vy = vyCap(w, rnd(190, 230)), t = 2 * vy / G;
+      w.mode = 'air'; w.vy = -vy; w.vx = Math.max(w.v, (1 + gap + 10) / t); w.gvy = null;   // always clears the gap
+      emit(p.fx + 6, BASE - 2, 8, ['#fff', '#ff3b5c'], 40, 50, 150);
     };
     const gp = push({ type: 'gap', len: gap }); gp.g = () => null;
   }
@@ -382,6 +392,15 @@
   function groundAt(x) { const p = pieceAt(x); return p ? p.g(x) : BASE; }
 
   // ---------------- physics ----------------
+  // never throw a wheel so high it goes off the top of the canvas (an upward speed, from where it is now)
+  const vyCap = (w, vy) => Math.min(vy, Math.sqrt(2 * G * Math.max(4, w.y - RW - 2)));
+
+  // the source got taller or shorter: the track moves to its new bottom, and everything on it moves along
+  function shiftDown(dy) {
+    for (const w of [wh, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
+    for (const q of [...parts, ...pops, ...rings, ...DECOR]) q.y += dy;
+  }
+
   function land(w, gy) {
     const impact = w.vy;
     w.y = gy - RW;
@@ -393,7 +412,7 @@
   function launchRamp(w, p) {
     w.x = p.x1; w.y = BASE - p.Hr - RW;
     const a = Math.atan(p.slope);
-    w.vx = w.v * Math.cos(a); w.vy = -w.v * Math.sin(a);
+    w.vx = w.v * Math.cos(a); w.vy = -vyCap(w, w.v * Math.sin(a));
     const t = (-w.vy + Math.sqrt(w.vy * w.vy + 2 * G * p.drop)) / G;
     const need = (p.gap + 8) / t;
     if (w.vx < need) w.vx = need;                     // always clear the gap
@@ -585,10 +604,11 @@
           else { ctx.fillRect(q.x - cx, BASE - 6, 2, 6); px(q.x - cx, BASE - 6, '#fff'); }
         }
       } else if (p.type === 'flipper') {
-        // a paddle from its pivot, resting just above the track, tip a little up, until it swats up
-        const a = -0.12 - p.up * 0.8, fx = p.fx - cx, fy = BASE - 3;
-        for (let s = 0; s <= 14; s++) {
-          const x = Math.round(fx + Math.cos(a) * s), y = Math.round(fy + Math.sin(a) * s), th = Math.round(4 - 2 * s / 14);
+        // a paddle hinged on the track's edge, sticking out over the gap nearly level with the track (just a
+        // little droop) until it swats up
+        const a = 0.22 - p.up * 0.85, fx = p.fx - cx, fy = BASE + 1;
+        for (let s = 0; s <= 13; s++) {
+          const x = Math.round(fx + Math.cos(a) * s), y = Math.round(fy + Math.sin(a) * s), th = Math.round(4 - 2 * s / 13);
           ctx.fillStyle = '#ff3b5c'; ctx.fillRect(x, y - (th >> 1), 1, th);
           px(x, y - (th >> 1), '#ffb3c1');
         }
@@ -654,7 +674,8 @@
   const DECOR = [];
   const DECOR_KINDS = ['die', 'chip', 'chip', 'coin', 'coin', 'heart', 'diamond', 'spade', 'seven', 'ball', 'star', 'star'];
   function newDecor(d, sx) {
-    Object.assign(d, { kind: pick(DECOR_KINDS), y: rnd(3, Math.max(4, BASE - 34)), ph: rnd(0, 6.3), face: ri(1, 6), chip: pick(CHIP_COLS) });
+    // in a low band just above the track
+    Object.assign(d, { kind: pick(DECOR_KINDS), y: rnd(BASE - 40, BASE - 20), ph: rnd(0, 6.3), face: ri(1, 6), chip: pick(CHIP_COLS) });
     d.x = sx + camX * d.par;
   }
   function placeDecor() {
@@ -785,7 +806,7 @@
   const queue = new Map();                      // key -> message, chatters waiting for a wheel
   let lastSpawn = -Infinity;
 
-  function handleChat({ name, text, tokens, color, platform = 'custom', action = false }) {
+  function handleChat({ name, text, tokens, color, platform = 'custom', action = false, owner = false }) {
     if (!name || !CFG.wheels || hidden || performance.now() < quietUntil) return;
     const lower = String(name).toLowerCase();
     if (BOTS.has(lower)) return;
@@ -795,11 +816,29 @@
     if (!tokens.some(t => t.t !== 'text' || t.v.trim())) return;
     const key = platform + ':' + lower;
     const m = { name: String(name).slice(0, 25), tokens, action, color, at: performance.now() };
+    if (owner) { ownerSays(m, platform !== 'demo'); return; }
     const r = riders.find(r => r.key === key);
     if (r) { if (r.phase === 'in') r.msg = m; else { r.phase = 'talk'; talk(r, m); } return; }
     queue.delete(key); queue.set(key, m);   // only their latest message waits
     if (queue.size > 8) queue.delete(queue.keys().next().value);
   }
+
+  // The broadcaster talks through the main wheel, which takes on their chat color (remembered for next
+  // time, so it's already theirs before they say anything).
+  const MAIN_KEY = 'race.main.v1';
+  // (demo chat's pretend streamer recolors it, but isn't remembered)
+  function ownerSays(m, remember) {
+    const pal = riderPal(m.name, m.color);
+    if (pal.main !== wh.pal.main) {
+      wh.pal = pal;
+      if (remember) try { localStorage.setItem(MAIN_KEY, JSON.stringify({ name: m.name, color: m.color || '' })); } catch (e) {}
+    }
+    talk(wh, m);
+  }
+  try {
+    const mc = JSON.parse(localStorage.getItem(MAIN_KEY) || 'null');
+    if (mc && mc.name) wh.pal = riderPal(mc.name, mc.color);
+  } catch (e) {}
 
   // New wheels roll in from the left edge, one at a time, while there's room.
   function spawnFromQueue(now) {
@@ -821,12 +860,13 @@
   }
 
   // Chat wheels race in to a spot near the middle, keep pace there while they talk, then race off to
-  // the right. The spots sit a bubble's width apart on either side of the streamer's wheel. On the way
-  // in and while parked, a wheel's speed is the camera's plus a pull toward its spot, so it slows into
-  // the spot and stays there over hills.
+  // the right. The spots sit a bubble's width apart on either side of the streamer's wheel, leaving the
+  // middle for the streamer's own bubble. On the way in and while parked, a wheel's speed is the camera's
+  // plus a pull toward its spot, so it slows into the spot and stays there over hills.
   const RUSH_IN = 240, RUSH_OUT = 260;
   const SLOT_W = CFG.bubbles ? Math.ceil((CFG.textsize * 17 + 24) / SCALE) : 16;
-  const slotX = (r) => camX + clamp(W * 0.5 + (r.slot % 2 ? 1 : -1) * (Math.floor(r.slot / 2) + 0.5) * SLOT_W, 12, W - 12);
+  const slotX = (r) => camX + (r === wh ? W * 0.5
+    : clamp(W * 0.5 + (r.slot % 2 ? 1 : -1) * (Math.floor(r.slot / 2) + 1) * SLOT_W, 12, W - 12));
   let camV = 0;
   function steerRiders(now) {
     for (const r of riders) {
@@ -845,7 +885,6 @@
     if (!CFG.bubbles) return;
     if (!r.bub) {
       r.bub = document.createElement('div'); r.bub.className = 'bub';
-      r.bub.style.setProperty('--c', r.pal.main);
       r.dots = DOTS.map(d => {
         const el = document.createElement('div'); el.className = 'bub-dot';
         el.style.width = el.style.height = d.size + 'px';
@@ -856,6 +895,7 @@
     }
     r.dots.forEach(el => el.classList.add('show'));
     const b = r.bub;
+    b.style.setProperty('--c', r.pal.main);
     b.textContent = '';
     if (CFG.names) { const n = document.createElement('b'); n.textContent = m.name; b.appendChild(n); }
     const t = document.createElement('span');
@@ -880,14 +920,14 @@
     measure(r);
   }
   function measure(r) { if (r.bub) { r.bw = r.bub.offsetWidth; r.bh = r.bub.offsetHeight; } }
-  if (document.fonts) document.fonts.addEventListener('loadingdone', () => riders.forEach(measure));
+  if (document.fonts) document.fonts.addEventListener('loadingdone', () => [wh, ...riders].forEach(measure));
 
   // A bubble stays over its wheel's parking spot, and only follows the track's height there, easing up
   // and down hills. While the wheel is in the air or going round a loop the bubble holds still, and its
   // tail stretches out to keep pointing at the wheel.
   function placeBubbles(cx, dt, now) {
     const top0 = innerHeight - H * SCALE;
-    for (const r of riders) {
+    for (const r of [wh, ...riders]) {
       const b = r.bub;
       if (!b) continue;
       if (now > r.sayUntil) { b.classList.remove('show'); r.dots.forEach(el => el.classList.remove('show')); continue; }
@@ -915,10 +955,10 @@
       setTimeout(() => els.forEach(el => el.remove()), 400);
     }
   }
-  function clearRiders() { [...riders].forEach(removeRider); queue.clear(); }
+  function clearRiders() { [...riders].forEach(removeRider); queue.clear(); wh.sayUntil = 0; }
 
   window.race = {
-    say: (name, text, opts = {}) => handleChat({ name, text, color: opts.color, platform: opts.platform || 'custom' }),
+    say: (name, text, opts = {}) => handleChat({ name, text, color: opts.color, platform: opts.platform || 'custom', owner: !!opts.owner }),
     clear: clearRiders,
   };
 
@@ -944,6 +984,7 @@
   gen();
   placeDecor();
   addEventListener('resize', placeDecor);
+  ready = true;
 
   function frame(now) {
     const rdt = Math.min(0.05, (now - last) / 1000), dt = rdt * SPEED; last = now;
@@ -1052,7 +1093,8 @@
           let msg = m[3], action = false;
           const act = /^\u0001ACTION (.*)\u0001$/.exec(msg);
           if (act) { msg = act[1]; action = true; }
-          handleChat({ name: tags['display-name'] || m[2], text: msg, tokens: twitchTokens(msg, tags), color: tags.color, platform: 'twitch', action });
+          handleChat({ name: tags['display-name'] || m[2], text: msg, tokens: twitchTokens(msg, tags), color: tags.color, platform: 'twitch', action,
+            owner: /(^|,)broadcaster\//.test(tags.badges || '') || m[2] === channel });
           continue;
         }
         // timeouts and bans take the wheel off the track
@@ -1089,7 +1131,8 @@
       if (ev2 === 'ChatMessageEvent') {
         const s = d.sender || {};
         handleChat({ name: s.username, text: (d.content || '').replace(/\[emote:\d+:([^\]]+)\]/g, '$1'),
-          tokens: kickTokens(d.content || ''), color: s.identity?.color, platform: 'kick' });
+          tokens: kickTokens(d.content || ''), color: s.identity?.color, platform: 'kick',
+          owner: (s.identity?.badges || []).some(b => b.type === 'broadcaster') || String(s.username || '').toLowerCase() === CFG.kick });
       } else if (ev2 === 'UserBannedEvent') {
         const key = 'kick:' + String(d.user?.username || '').toLowerCase();
         const r = riders.find(r => r.key === key); if (r) removeRider(r); queue.delete(key);
@@ -1121,7 +1164,8 @@
       if (type && !['chat', 'comment', 'message', 'chatmessage'].includes(type)) return;
       const name = d.nickname || d.uniqueId || d.displayName || d.chatname || d.user?.nickname || d.user?.uniqueId || d.user?.name || d.username;
       const text = d.comment || d.message || d.text || d.chatmessage;
-      if (name && typeof text === 'string') handleChat({ name, text, color: d.color, platform });
+      if (name && typeof text === 'string')
+        handleChat({ name, text, color: d.color, platform, owner: !!(d.isOwner || d.isStreamer || d.isBroadcaster || d.isChatOwner) });
     };
     ws.onclose = () => setTimeout(() => connectBridge(url, platform), 3000);
     ws.onerror = () => {};
@@ -1150,7 +1194,7 @@
           // spread a batch out over the poll window (and skip the backlog on connect)
           if (!first) {
             const items = (j.items || []).filter(it => it.snippet?.displayMessage);
-            items.forEach((it, i) => setTimeout(() => handleChat({ name: it.authorDetails?.displayName, text: it.snippet.displayMessage, platform: 'youtube' }),
+            items.forEach((it, i) => setTimeout(() => handleChat({ name: it.authorDetails?.displayName, text: it.snippet.displayMessage, platform: 'youtube', owner: !!it.authorDetails?.isChatOwner }),
               i / Math.max(1, items.length) * wait * 0.8));
           }
           first = false;
@@ -1168,9 +1212,11 @@
     const lines = ['LETS GOOO', 'that loop was clean', 'hi chat!! 👋', 'speeeeed', 'nice jump', 'who taught it to do that',
       'gg', 'BOOST PAD', 'I would simply not fall', 'catch me if you can', 'lol it bounced', 'vroom vroom', 'first time here, love this'];
     const colors = ['#FF4500', '#1E90FF', '#9ACD32', '#FF69B4', '#8A2BE2', '#00FF7F', '', '#DAA520'];
+    const streamer = ['welcome in everyone!', 'ok who keeps crashing', 'chat, place your bets', 'one more loop then we go'];
     const tick = () => {
       const name = pick(names);
-      handleChat({ name, text: pick(lines), color: colors[hash(name) % colors.length], platform: 'demo' });
+      if (Math.random() < 0.12) handleChat({ name: 'the_streamer', text: pick(streamer), color: '#FFB000', platform: 'demo', owner: true });
+      else handleChat({ name, text: pick(lines), color: colors[hash(name) % colors.length], platform: 'demo' });
       setTimeout(tick, rnd(1500, 4500));
     };
     setTimeout(tick, 800);
