@@ -430,14 +430,19 @@
   }
 
   // ---- the ghost: rides each new piece before it's kept ----
+  // The wheels all move in the same fixed steps (STEP), and the streamer's wheel starts where the ghost
+  // did, so it rides each piece exactly the way the ghost did, whatever the frame rate.
   let SIM = false;   // true while a ghost rides (no sparks, scores or flashing machines)
+  const STEP = 1 / 240;
   const ghost = Object.assign(wheel(RW + 2, CRUISE, MAIN_PAL), { main: true, ghost: true });
   const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot'];
   const stateOf = w => Object.fromEntries(STATE.map(k => [k, w[k]]));
-  function ride(w, toX) {   // false if it falls, stalls in a loop or hits something on the way
-    for (let n = 0; w.x < toX; n++) {
+  // Rides up to just short of the end of the track built so far (so it never sees past it, where the
+  // ground isn't there yet). False if it falls, stalls in a loop or hits something on the way.
+  function ride(w) {
+    for (let n = 0; w.x < genX - 2; n++) {
       if (n > 240 * 20) return false;
-      step(w, 1 / 240);
+      step(w, STEP);
       if (w.fell || w.stalled || w.crashed) return false;
     }
     return true;
@@ -447,11 +452,11 @@
     MAKE[k](o);
     flat(AIRY.has(k) ? ri(40, 60) : ri(16, 40));
     SIM = true;
-    // it has to work a little slower and a little faster too, since the real wheel's frames won't line up exactly
+    // it has to work a little slower and a little faster too, for some room to spare
     const twin = f => Object.assign(wheel(0, CRUISE, MAIN_PAL), s, { main: true, ghost: true, v: s.v * f, vx: s.vx * f });
-    let ok = ride(twin(0.95), genX) && ride(twin(1.05), genX) && ride(ghost, genX);
+    let ok = ride(twin(0.95)) && ride(twin(1.05)) && ride(ghost);
     // and the next piece only starts once it's back on solid track
-    while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost, genX); }
+    while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost); }
     SIM = false;
     if (!ok) { pieces.length = n; genX = gx; Object.assign(ghost, s, { fell: false, stalled: false, crashed: false }); }
     return ok;
@@ -463,7 +468,7 @@
       let r = Math.random() * ks.reduce((a, k) => a + WEIGHT[k], 0), k;
       for (k of ks) { r -= WEIGHT[k]; if (r <= 0) break; }
       if (options(k).some(o => tryBuild(k, o))) lastType = k;
-      else { flat(24); SIM = true; ride(ghost, genX); SIM = false; }
+      else { flat(24); SIM = true; ride(ghost); SIM = false; }
     }
   }
 
@@ -478,6 +483,15 @@
   function shiftDown(dy) {
     for (const w of [wh, ghost, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
     for (const q of [...parts, ...pops, ...rings, ...DECOR]) q.y += dy;
+  }
+
+  // Coming up short on a gap. A jump the ghost comes up short on isn't kept, so this is only ever a chat
+  // wheel (they go at steered speeds): it bonks off the side and scrambles up onto the ledge.
+  function hitWall(w, ax) {
+    if (w.ghost) { w.fell = true; return; }
+    const lip = groundAt(w.x);
+    w.x = ax; w.vx = Math.max(40, Math.abs(w.vx) * 0.5); w.vy = -Math.sqrt(2 * G * (w.y + RW - lip + 4));
+    emit(w.x + RW, w.y, 6, ['#fff', C.top], 30, 30, 200);
   }
 
   function land(w, gy) {
@@ -547,9 +561,16 @@
       w.gvy = nvy; w.y = ng - RW;
 
     } else if (w.mode === 'air') {
+      const ax = w.x;
       w.vy += G * dt; w.x += w.vx * dt; w.y += w.vy * dt; w.rot += w.vx * dt / RW;
+      // a flipper swats anything that comes in low, rolling or not
+      for (const p of pieces) if (p.type === 'flipper' && ax < p.trig && w.x >= p.trig && w.y + RW >= BASE - 5) { p.onTrig(w); return; }
       const gy = groundAt(w.x);
-      if (gy != null && w.vy > 0 && w.y + RW >= gy) land(w, gy);
+      if (gy != null && w.vy > 0 && w.y + RW >= gy) {
+        // coming in over the far edge of a gap below its lip: it hits the side and drops into the gap
+        if (groundAt(ax) == null && w.y + RW - gy > 3) hitWall(w, ax);
+        else land(w, gy);
+      }
       if (w.y > H + 40) respawn(w);
 
     } else { // loop
@@ -1060,7 +1081,7 @@
   // Sidescroller camera: the wheel enters from the left edge, camera starts scrolling
   // once it reaches the center, and never scrolls backward.
   wh.x = RW + 2;
-  let camX = 0, last = performance.now();
+  let camX = 0, last = performance.now(), acc = 0;
   gen();
   placeDecor();
   addEventListener('resize', placeDecor);
@@ -1068,10 +1089,10 @@
 
   function frame(now) {
     const rdt = Math.min(0.05, (now - last) / 1000), dt = rdt * SPEED; last = now;
-    const N = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / N;
     steerRiders(now);
     const all = [...riders, wh];
-    for (let i = 0; i < N; i++) for (const w of all) step(w, h);
+    acc += dt;
+    for (let n = 0; acc >= STEP && n < 300; n++) { for (const w of all) step(w, STEP); acc -= STEP; }
 
     simT += dt;
     for (const p of pieces) {
