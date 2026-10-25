@@ -71,7 +71,7 @@
   .bub{position:fixed;left:0;top:0;width:max-content;max-width:calc(var(--ts) * 17);box-sizing:border-box;
     padding:calc(var(--p) + 3px) calc(var(--p) + 5px);background:#fffaf0;color:var(--ink);
     font:500 var(--ts)/1.3 var(--txt);overflow-wrap:anywhere;box-shadow:var(--vx);
-    pointer-events:none;will-change:transform;opacity:0;transition:opacity .25s;transform-origin:var(--ox,16px) 100%}
+    pointer-events:none;will-change:translate,scale;opacity:0;transition:opacity .25s;transform-origin:var(--ox,16px) 100%}
   .bub.show{opacity:1;animation:grow .3s cubic-bezier(.25,1.25,.5,1)}
   .bub b{display:block;width:max-content;max-width:100%;margin:0 0 5px;padding:4px 5px 3px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap;font:400 calc(var(--ts) * .58)/1.2 var(--pix);
@@ -80,7 +80,7 @@
   .bub img{height:1.6em;vertical-align:middle;margin:-.1em .1em}
   /* the tail: shrinking squares spaced out along the line from the bubble to its wheel */
   .bub-dot{position:fixed;left:0;top:0;background:#fffaf0;box-shadow:var(--vx);pointer-events:none;
-    will-change:transform;opacity:0;transition:opacity .3s}
+    will-change:translate,scale;opacity:0;transition:opacity .3s}
   .bub-dot.show{opacity:1;animation:grow .3s ease-out}
 
   /* ---------- settings window (only visible while you interact with the source) ---------- */
@@ -404,11 +404,11 @@
     const gp = push({ type: 'gap', len: gap }); gp.g = () => null;
   }
 
-  // A slot machine arched over the track: a wheel rolling through spins the reels, and sometimes it's 7-7-7.
+  // The slot machine set piece's reels: a wheel going through underneath (at p.cx) spins them, and sometimes
+  // it's 7-7-7.
   const SYMS = ['seven', 'cherry', 'bell', 'diamond'];
-  function slots() {
-    const p = push({ type: 'slots', len: 64 }); p.g = () => BASE;
-    p.cx = p.x0 + 32; p.trig = p.cx; p.payAt = 0; p.won = -9;
+  function slotMachine(p) {
+    p.trig = p.cx; p.payAt = 0; p.won = -9;
     p.reels = [0, 1, 2].map(() => ({ s: ri(0, SYMS.length - 1), until: 0 }));
     p.onTrig = () => {
       if (SIM || p.reels.some(r => r.until > simT)) return;   // a ghost doesn't play; or still spinning
@@ -451,25 +451,58 @@
     p.ax = p.x0 + 22; p.neon = Math.random() < 0.5;
     p.cols = pick(TENT_COLS); p.sign = p.neon ? pick(['WIN', 'LUCKY', 'VEGAS']) : 'CIRCUS';
   }
-  // Most tunnels are set pieces (see SETS): a mini-golf obstacle the wheels go in one end of and come out
-  // the other. They stand 56 px tall, so a strip shorter than the default gets plain stone tunnels.
+  // Tunnels are set pieces (see SETS): mini-golf obstacles the wheels go in one end of and come out the
+  // other. They stand 62 px tall, so a strip shorter than the default gets plain deco tunnels instead.
   function tunnel() {
     if (ROWS >= 72) {
       const set = pick(Object.keys(SETS)), s = SETS[set], art = s.img ??= s.make();
       const p = push({ type: 'tunnel', len: art.width + 6 }); p.g = () => BASE;
-      Object.assign(p, { set, art, ax: p.x0 + 3, ph: rnd(0, 5) });
+      Object.assign(p, { set, art, ax: p.x0 + 3, ph: rnd(0, 5), cx: p.x0 + 3 + art.width / 2 });
+      // a wheel going in sets its scene going (see SETS), with a shout from the monster now and then
+      const go = () => {
+        if (SIM || simT - (p.active ?? -9) < 3) return;
+        p.active = simT;
+        if (s.shout) popup(p.cx, BASE + 6 - art.height, s.shout, '#fffaf0');
+      };
+      if (set === 'slots') { slotMachine(p); const spin = p.onTrig; p.onTrig = w => { spin(w); go(); }; }
+      else { p.trig = p.x0 + 4; p.onTrig = go; }
       return;
     }
-    const L = ri(56, 90), p = push({ type: 'tunnel', len: L + 16 }); p.g = () => BASE;
-    p.ta = p.x0 + 8; p.tb = p.ta + L;
+    const art = bakeDecoTunnel(ri(56, 90)), p = push({ type: 'tunnel', len: art.width + 6 }); p.g = () => BASE;
+    Object.assign(p, { art, ax: p.x0 + 3 });
   }
   function pipe() {
     const p = push({ type: 'pipe', len: ri(60, 110) }); p.g = () => BASE;
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
-    arch: 1.5, tunnel: 1.2, pipe: 1.5 };
-  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets, coaster, dominoes, arch, tunnel, pipe };
+  // Two tracks at once, and each wheel keeps to one of them (see groundFor): a braid, two tracks weaving
+  // over and under each other with the second drawn in front of the wheels; or a split, where one lane
+  // stays down while the other climbs onto an upper deck and comes back down to join it. The streamer's
+  // wheel's lane is picked here, so the ghost rides the same one.
+  function braid(o) {
+    const { L, A } = o, p = push({ type: 'braid', len: L }), s = x => (x - p.x0) / L;
+    p.lanes = [x => BASE - A * Math.sin(Math.PI * s(x)) ** 2, x => BASE - A * 0.55 * Math.sin(2 * Math.PI * s(x)) ** 2];
+    p.g = p.lanes[0]; p.mainLane = o.lane; p.frontLane = 1;
+  }
+  function split(o) {
+    const { L, A } = o, p = push({ type: 'split', len: L }), up = 36;
+    p.lanes = [() => BASE, x => { const u = x - p.x0; return BASE - A * smooth(clamp(Math.min(u, L - u) / up, 0, 1)); }];
+    p.g = p.lanes[0]; p.mainLane = o.lane;
+  }
+  // which lane a wheel's on in a two-lane piece (picked the first time it's asked), and the ground under it
+  function laneOf(w, p) {
+    w.lanes ??= new Map();
+    if (!w.lanes.has(p)) { w.lanes.set(p, w.main ? p.mainLane : Math.random() < 0.5 ? 0 : 1); if (w.lanes.size > 40) w.lanes.delete(w.lanes.keys().next().value); }
+    return w.lanes.get(p);
+  }
+  function groundFor(w, x) {
+    const p = pieceAt(x);
+    return !p ? BASE : p.lanes ? p.lanes[laneOf(w, p)](x) : p.g(x);
+  }
+
+  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
+    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5 };
+  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split };
   // pieces that throw wheels into the air get a longer flat after them to land on
   const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster']);
   // loops fit within the strip (`rows`), whatever the size of the source
@@ -492,6 +525,11 @@
       // otherwise start from that and go up
       const R = ri(14, MAX_R), need = Math.ceil(Math.sqrt(5.6 * G * (R - RW)) / 10) * 10;
       return [{ R }, ...[0, 10, 20, 40].map(d => ({ R, run: ri(6, 14), power: Math.min(200, need + d) })), { R: 14, run: 6, power: 200 }];
+    }
+    if (k === 'braid' || k === 'split') {
+      // the streamer's wheel takes either lane, whichever the ghost gets along
+      const L = ri(150, 200), A = ri(14, Math.max(14, Math.min(24, ROWS - 40))), lane = ri(0, 1);
+      return [{ L, A, lane }, { L, A, lane: 1 - lane }, { L, A: 12, lane: 0 }];
     }
     if (k === 'coaster') {
       // as high as fits in the strip, with a loop at the bottom of the drop when the drop is fast enough
@@ -569,7 +607,7 @@
   // wheel (they go at steered speeds): it bonks off the side and scrambles up onto the ledge.
   function hitWall(w, ax) {
     if (w.ghost) { w.fell = true; return; }
-    const lip = groundAt(w.x);
+    const lip = groundFor(w, w.x);
     w.x = ax; w.vx = Math.max(40, Math.abs(w.vx) * 0.5); w.vy = -Math.sqrt(2 * G * (w.y + RW - lip + 4));
     emit(w.x + RW, w.y, 6, ['#fff', C.top], 30, 30, 200);
   }
@@ -595,8 +633,8 @@
 
   function respawn(w) {
     if (w.ghost) { w.fell = true; return; }   // a piece the ghost falls off isn't kept
-    let x = w.x; while (groundAt(x) == null) x += 2;
-    w.x = x + 4; w.y = groundAt(w.x) - RW; w.mode = 'ground'; w.v = w.cruise; w.gvy = null;
+    let x = w.x; while (groundFor(w, x) == null) x += 2;
+    w.x = x + 4; w.y = groundFor(w, w.x) - RW; w.mode = 'ground'; w.v = w.cruise; w.gvy = null;
     emit(w.x, w.y, 16, ['#fff', '#ccc', C.boostA], 50, 60, 80);
   }
 
@@ -613,7 +651,7 @@
     if (w.mode === 'ground') {
       // chatters' wheels are steered (see steerRiders), so they speed up and brake harder
       const cruise = w.cruise, grip = w.main ? 1 : 3;
-      const sg = x => { const g = groundAt(x); return g == null ? w.y + RW : g; };
+      const sg = x => { const g = groundFor(w, x); return g == null ? w.y + RW : g; };
       const s = (sg(w.x + 0.75) - sg(w.x - 0.75)) / 1.5;
       const cs = 1 / Math.sqrt(1 + s * s), sn = s * cs;
       if (w.steer != null) w.v = w.steer;   // arriving and parked chat wheels go exactly as fast as steered
@@ -633,7 +671,7 @@
         if (p.touch != null && px < p.touch && w.x >= p.touch) { p.onTouch(w); return; }
         if (p.ts && !SIM) for (const t of p.ts) if (!t.down && px < t.x - RW + 1 && w.x >= t.x - RW + 1) knock(p, t);
       }
-      const ng = groundAt(w.x);
+      const ng = groundFor(w, w.x);
       if (ng == null) { w.mode = 'air'; w.vx = w.v * cs; w.vy = w.v * sn; return; }
       const nvy = (ng - RW - w.y) / dt;
       // ground falling away faster than gravity → catch some air off crests
@@ -647,10 +685,10 @@
       w.vy += G * dt; w.x += w.vx * dt; w.y += w.vy * dt; w.rot += w.vx * dt / RW;
       // a flipper swats anything that comes in low, rolling or not
       for (const p of pieces) if (p.type === 'flipper' && ax < p.trig && w.x >= p.trig && w.y + RW >= BASE - 5) { p.onTrig(w); return; }
-      const gy = groundAt(w.x);
+      const gy = groundFor(w, w.x);
       if (gy != null && w.vy > 0 && w.y + RW >= gy) {
         // coming in over the far edge of a gap below its lip: it hits the side and drops into the gap
-        if (groundAt(ax) == null && w.y + RW - gy > 3) hitWall(w, ax);
+        if (groundFor(w, ax) == null && w.y + RW - gy > 3) hitWall(w, ax);
         else land(w, gy);
       }
       if (w.y > H + 40) respawn(w);
@@ -744,7 +782,9 @@
         for (let i = 0; i < e; i++) px(sx + 2 + (i & 1) * (w - 5), BASE - 2 - i, C.coil);
         ctx.fillStyle = C.pad; ctx.fillRect(sx, BASE - 3 - e, w, 1);
         ctx.fillStyle = C.padDark; ctx.fillRect(sx, BASE - 2 - e, w, 1);
-      } else if (p.type === 'lift') {
+      } else if (p.type === 'arch') drawArch(p, cx, t, 'back');
+      else if (p.lanes && p.frontLane == null) drawLane(p, cx, p.lanes[1], false);   // a split's upper deck
+      else if (p.type === 'lift') {
         // the chain: dark links creeping up the lift
         for (let wx = Math.ceil(p.x0); wx < p.x1; wx++)
           if ((((wx - t * p.chain) % 4) + 4) % 4 < 1) px(wx - cx, Math.round(p.g(wx)) + 1, '#3a2030');
@@ -821,18 +861,34 @@
           px(x, y - (th >> 1), '#ffb3c1');
         }
         ctx.fillStyle = '#e9e6ff'; ctx.fillRect(fx - 1, fy - 1, 3, 3); px(fx, fy, '#6a6488');
-      } else if (p.type === 'slots') drawSlots(p, cx, t);
+      }
+    }
+  }
+
+  // The second lane of a two-lane piece: a strip of track like the main one, drawn the whole way, so it
+  // peels smoothly off the main track at the fork and runs back into it where they join. A split's upper
+  // deck stands on lattice and posts down to the lower lane once there's room under it; a braid's front lane
+  // is drawn in front of the wheels, with only short brackets so it doesn't hide the lane behind it.
+  function drawLane(p, cx, g, front) {
+    for (let wx = Math.max(Math.ceil(p.x0), cx); wx < Math.min(p.x1, cx + W); wx++) {
+      const sx = wx - cx, y = Math.round(g(wx)), low = Math.round(p.lanes[0](wx));
+      if (!front && low - y > 5) {
+        for (let yy = y + 4; yy < low; yy++) if (((wx + yy) & 1) === 0) px(sx, yy, C.lattice);
+        if ((((wx % 16) + 16) % 16) === 0) { ctx.fillStyle = C.post; ctx.fillRect(sx, y + 4, 1, low - y - 4); }
+      } else if (front && Math.abs(low - y) > 6 && (((wx % 20) + 20) % 20) === 0) { ctx.fillStyle = C.post; ctx.fillRect(sx, y + 4, 1, 3); }
+      px(sx, y, C.top); px(sx, y + 1, C.body); px(sx, y + 2, C.dark); px(sx, y + 3, C.shade);
     }
   }
 
   // An arch over the track: a half-ring with a straight leg down from each end to the track, made from one
-  // shape so the legs always meet the ring. It's drawn in front of the wheels, so they pass behind its legs
-  // and through the middle. Bulbs chase round the outside and a sign sits on top. Circus arches are striped
-  // in their colors; casino arches are neon tubes that flicker.
-  function drawArch(p, cx, t) {
+  // shape so the legs always meet the ring. It's seen at a slant, so its left half is drawn behind the wheels
+  // (side 'back') and its right half in front of them ('front'): the wheels go in behind one leg and come
+  // out in front of the other. Bulbs chase round the outside and a sign sits on top. Circus arches are
+  // striped in their colors; casino arches are neon tubes that flicker.
+  function drawArch(p, cx, t, side) {
     const ax = Math.round(p.ax - cx), R = 15, cy = BASE - 15, [A, B] = p.cols, th = p.neon ? 2 : 3;
-    const neonC = ['#ff3bd0', '#3ff8ff'][Math.floor(t * 2 + p.ax) & 1];
-    for (let y = cy - R; y < BASE; y++) for (let dx = -R; dx <= R; dx++) {
+    const neonC = ['#ff3bd0', '#3ff8ff'][Math.floor(t * 2 + p.ax) & 1], back = side === 'back';
+    for (let y = cy - R; y < BASE; y++) for (let dx = back ? -R : 0; dx <= (back ? -1 : R); dx++) {
       const leg = y > cy && Math.abs(dx) > R - th;
       const ring = y <= cy && Math.hypot(dx, y - cy) <= R + 0.5 && Math.hypot(dx, y - cy) > R - th + 0.5;
       if (!leg && !ring) continue;
@@ -840,10 +896,11 @@
       const along = ring ? Math.floor((Math.atan2(y - cy, dx) + Math.PI) / Math.PI * 12) : Math.floor((y - cy) / 2) + 99;
       px(ax + dx, y, p.neon ? (Math.abs(dx) > R - 1 || Math.hypot(dx, y - cy) > R - 0.5 ? '#2a2236' : neonC) : along & 1 ? A : B);
     }
-    for (let i = 0; i <= 16; i++) {
+    for (let i = back ? 0 : 8; i <= (back ? 7 : 16); i++) {
       const a = Math.PI + i / 16 * Math.PI;
       px(Math.round(ax + Math.cos(a) * (R + 1.5)), Math.round(cy + Math.sin(a) * (R + 1.5)), (i + Math.floor(t * 6)) % 3 ? '#fff3a8' : '#ffd84a');
     }
+    if (back) return;
     const w = p.sign.length * 4 + 3, sy = cy - R - 9;
     ctx.fillStyle = p.neon ? '#2a2236' : A; ctx.fillRect(ax - (w >> 1), sy, w, 8);
     ctx.fillStyle = '#ffd84a'; ctx.fillRect(ax - (w >> 1), sy + 7, w, 1);
@@ -861,12 +918,41 @@
   const ramp = hex => { const c = hexRgb(hex); return [tintRgb(c, 0.5), tintRgb(c, 0.22), c, tintRgb(c, -0.25), tintRgb(c, -0.5)]; };   // lightest first
   const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   class Art {
-    constructor(w, h) { this.w = w; this.h = h; this.px = new Array(w * h).fill(null); }
-    put(x, y, c) { x = Math.round(x); y = Math.round(y); if (x >= 0 && y >= 0 && x < this.w && y < this.h) this.px[y * this.w + x] = c; }
-    // a shade from a ramp for a lightness v (1 = full light), dithered so neighbouring shades mix
+    // Two layers: px is drawn behind the track and the wheels (the figures, and a tunnel's back wall), fr in
+    // front of them (what's drawn while `front` is set: a tunnel's front wall, with its openings cut out by
+    // hole(), so the wheels are seen going through). With `hatch` set, shading is laid in diagonal strokes,
+    // comic style, rather than dithered.
+    constructor(w, h) {
+      this.w = w; this.h = h; this.px = new Array(w * h).fill(null); this.fr = new Array(w * h).fill(null);
+      this.front = false; this.hatch = false;
+    }
+    put(x, y, c) {
+      x = Math.round(x); y = Math.round(y);
+      if (x >= 0 && y >= 0 && x < this.w && y < this.h) (this.front ? this.fr : this.px)[y * this.w + x] = c;
+    }
+    // an opening in the front wall, with the back wall's color c seen through it
+    hole(x, y, c) {
+      x = Math.round(x); y = Math.round(y);
+      if (x >= 0 && y >= 0 && x < this.w && y < this.h) { this.fr[y * this.w + x] = null; this.px[y * this.w + x] = c; }
+    }
+    // a shade from a ramp for a lightness v (1 = full light), dithered (or hatched) so neighbouring shades mix
     tone(x, y, r, v) {
-      const i = Math.round((1 - clamp(v, 0, 1)) * (r.length - 1) + (BAYER4[(Math.round(y) & 3) * 4 + (Math.round(x) & 3)] / 16 - 0.5) * 0.9);
+      x = Math.round(x); y = Math.round(y);
+      const jitter = this.hatch ? ((((x + y) % 4) + 4) % 4) / 4 - 0.4 : BAYER4[(y & 3) * 4 + (x & 3)] / 16 - 0.5;
+      const i = Math.round((1 - clamp(v, 0, 1)) * (r.length - 1) + jitter * (this.hatch ? 1.3 : 0.9));
       this.put(x, y, r[clamp(i, 0, r.length - 1)]);
+    }
+    // Grime for the monsters: flecks of dirt, darker diagonal strokes in the shadows, and a few scratches.
+    grunge(seed, y1) {
+      const h = (x, y) => ((x * 73856093) ^ (y * 19349663) ^ seed) >>> 0;
+      for (let y = 0; y < y1; y++) for (let x = 0; x < this.w; x++) {
+        const i = y * this.w + x, c = this.px[i];
+        if (!c || c === INK) continue;
+        const lum = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11, n = h(x, y) % 23;
+        if (n === 0) this.px[i] = tintRgb(c, -0.35);
+        else if (n === 1 && lum > 90) this.px[i] = tintRgb(c, 0.25);
+        else if (lum < 85 && ((x - y) % 3 + 3) % 3 === 0) this.px[i] = tintRgb(c, -0.4);
+      }
     }
     rect(x, y, w, h, c) { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) this.put(x + i, y + j, c); }
     // a lit block: brighter toward the top left, a highlight along its top and left edges, shadow down the right
@@ -909,118 +995,202 @@
       const n = Math.max(1, Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))));
       for (let i = 0; i <= n; i++) this.put(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, c);
     }
-    // dark ink all round the outside
+    // dark ink all round the outside, on each layer
     outline() {
-      const out = this.px.slice(), on = (x, y) => x >= 0 && y >= 0 && x < this.w && y < this.h && this.px[y * this.w + x] && this.px[y * this.w + x] !== INK;
-      for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++)
-        if (!this.px[y * this.w + x] && (on(x + 1, y) || on(x - 1, y) || on(x, y + 1) || on(x, y - 1))) out[y * this.w + x] = INK;
-      this.px = out;
+      const ink = (list) => {
+        const out = list.slice(), on = (x, y) => x >= 0 && y >= 0 && x < this.w && y < this.h && list[y * this.w + x] && list[y * this.w + x] !== INK;
+        for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++)
+          if (!list[y * this.w + x] && (on(x + 1, y) || on(x - 1, y) || on(x, y + 1) || on(x, y - 1))) out[y * this.w + x] = INK;
+        return out;
+      };
+      this.px = ink(this.px); this.fr = ink(this.fr);
     }
+    // the behind-the-track layer as a canvas, with the in-front layer as a second canvas on its .front
     canvas() {
-      const c = document.createElement('canvas'); c.width = this.w; c.height = this.h;
-      const g = c.getContext('2d'), im = g.createImageData(this.w, this.h);
-      this.px.forEach((p, i) => { if (p) { im.data[i * 4] = p[0]; im.data[i * 4 + 1] = p[1]; im.data[i * 4 + 2] = p[2]; im.data[i * 4 + 3] = 255; } });
-      g.putImageData(im, 0, 0);
+      const paint = (list) => {
+        const c = document.createElement('canvas'); c.width = this.w; c.height = this.h;
+        const g = c.getContext('2d'), im = g.createImageData(this.w, this.h);
+        list.forEach((p, i) => { if (p) { im.data[i * 4] = p[0]; im.data[i * 4 + 1] = p[1]; im.data[i * 4 + 2] = p[2]; im.data[i * 4 + 3] = p[3] ?? 255; } });
+        g.putImageData(im, 0, 0);
+        return c;
+      };
+      const c = paint(this.px);
+      c.front = paint(this.fr);
       return c;
     }
   }
   const WHITE = [250, 246, 238], DARK = [26, 14, 30], GOLD = ramp('#ffc83a');
 
-  // The painted block every set piece stands on: 14 rows over the track (it sits on the track's bottom
-  // edge), striped and checked like mini-golf trim, with a round-topped hole at each end.
-  const PLINTH = 14;
+  // Every set piece stands on an art deco tunnel over the track, seen from a little above and in front, as
+  // a box around the track (the canvas's bottom row is the track's bottom edge):
+  //   the far wall, behind the track and the wheels: in shadow, with lit round-topped windows between pillars;
+  //   the roof, a lit strip seen from above between the far wall's top and the near wall's (the figures
+  //     stand on it);
+  //   the near wall, in front of the wheels: an arcade, a beam across the top (gold cornice, the name goes
+  //     on it) on pillars, with round arches between them reaching down to the track.
+  // So the track runs right through, and the wheels are seen inside through the arches, rolling past the
+  // far wall and going behind each pillar of the near one.
+  const PLINTH = 20;
+  const darker = hex => '#' + tintRgb(hexRgb(hex), -0.45).map(v => v.toString(16).padStart(2, '0')).join('');   // the far wall, in shadow
   function plinth(a, col, trim) {
-    const y = a.h - PLINTH, t = hexRgb(trim);
-    a.box(1, y, a.w - 2, PLINTH, ramp(col), 0.72);
-    for (let x = 2; x < a.w - 2; x++) a.put(x, y + 2, t);
-    for (let x = 2; x < a.w - 3; x += 4) for (const dy of [11, 12]) { a.put(x, y + dy, t); a.put(x + 1, y + dy, t); }
-    for (const hx of [3, a.w - 13]) for (let j = 0; j < 11; j++) for (let i = 0; i < 10; i++) {
-      const dx = i - 4.5, half = j < 5 ? Math.sqrt(Math.max(0, 25 - (5 - j) ** 2)) : 5;
-      if (Math.abs(dx) > half) continue;
-      a.put(hx + i, a.h - 11 + j, Math.abs(dx) > half - 1.2 || j === 0 ? [58, 36, 66] : DARK);
+    const r = ramp(col), y0 = a.h - PLINTH, w = a.w, T = hexRgb(trim), floor = a.h - 5;   // floor: the row above the track
+    // the far wall
+    a.box(2, y0, w - 4, floor - y0 + 1, ramp(darker(col)), 0.6);
+    for (let x = 5; x < w - 6; x += 6) {
+      for (let y = y0 + 4; y < floor - 1; y++) for (let i = 0; i < 3; i++) {
+        if (y === y0 + 4 && i !== 1) continue;   // round-topped
+        a.put(x + i, y, (x / 6 & 1) || y > y0 + 8 ? [255, 214, 140] : [255, 236, 190]);
+      }
+      a.line(x + 4, y0 + 3, x + 4, floor, r[3]);
     }
+    // the roof, from above
+    a.box(2, y0 - 3, w - 4, 3, r, 1);
+    for (let x = 3; x < w - 3; x += 3) a.put(x, y0 - 2, r[1]);
+    // the near wall: the beam, then the arcade
+    a.front = true;
+    a.box(1, y0, w - 2, 7, r, 0.8);
+    for (let x = 1; x < w - 1; x++) { a.put(x, y0, GOLD[1]); a.put(x, y0 + 6, T); }
+    const n = Math.max(2, Math.round((w - 5) / 15)), bay = (w - 5) / n;
+    for (let k = 0; k <= n; k++) {   // the pillars, with gold capitals
+      const x = Math.round(1 + k * bay);
+      a.box(x, y0 + 7, 3, a.h - y0 - 7, r, 0.8);
+      a.rect(x - (k ? 1 : 0), y0 + 7, 3 + (k && k < n ? 2 : 1), 1, GOLD[1]);
+      a.put(x + 1, a.h - 1, GOLD[3]);
+    }
+    for (let k = 0; k < n; k++) {   // the arches between them: spandrels down to a round top, gold-trimmed
+      const xl = Math.round(1 + k * bay) + 3, xr = Math.round(1 + (k + 1) * bay) - 1, half = (xr - xl + 1) / 2, xc = (xl + xr) / 2;
+      const cyA = y0 + 7 + half;
+      for (let y = y0 + 7; y < a.h; y++) for (let x = xl; x <= xr; x++) {
+        const d = y >= cyA ? Math.abs(x - xc) : Math.hypot(x - xc, y - cyA);
+        if (d <= half - 0.2) a.put(x, y, null);
+        else if (d <= half + 0.8) a.put(x, y, GOLD[2]);
+        else a.tone(x, y, r, 0.7);
+      }
+    }
+    a.front = false;
   }
-
-  // ---- the monsters ----
-  function bakeApe() {
-    const a = new Art(46, 56), fur = ramp('#6a4430'), skin = ramp('#c8946a'), G = a.h - PLINTH - 1;
-    plinth(a, '#2f9d5a', '#ffd84a');
-    a.limb(30, G - 9, 32, G - 1, 5, 4.5, fur); a.ball(34, G - 1, 5, 2, fur);            // legs and feet
-    a.limb(17, G - 9, 14, G - 1, 5.5, 4.5, fur); a.ball(12, G - 1, 5, 2, fur);
-    a.limb(34, 17, 39, 27, 4.5, 4, fur); a.limb(39, 27, 39, 34, 4, 3.5, fur); a.ball(39, 35, 4, 3, skin);   // arm down
-    a.ball(23, 23, 13, 12, fur, true);                                                  // body
-    a.ball(19, 24, 7, 8, skin, true);                                                   // chest
-    a.line(15, 22, 22, 22, skin[3]); a.line(19, 26, 19, 30, skin[3]);
-    a.limb(12, 17, 7, 10, 5, 4, fur); a.limb(7, 10, 6, 6, 4, 3.5, fur); a.ball(6, 5, 4.5, 4, skin, true);   // arm up, fist
-    for (const k of [4, 6, 8]) a.put(k, 3, skin[3]);
-    a.ball(16, 11, 8.5, 7.5, fur, true);                                                // head
-    a.ball(13, 14, 6.5, 4.5, skin, true);                                               // muzzle
-    a.ball(23, 11, 2, 2.5, skin);                                                       // ear
-    a.line(9, 9, 20, 8, fur[4]); a.line(9, 10, 12, 11, fur[4]); a.line(15, 11, 19, 10, fur[4]);   // a glowering brow
-    for (const [x, y] of [[11, 11], [12, 11], [17, 11], [18, 11]]) a.put(x, y, [255, 214, 60]);
-    a.put(12, 11, DARK); a.put(17, 11, DARK);
-    a.put(11, 14, DARK); a.put(14, 14, DARK);                                           // nostrils
-    a.rect(9, 16, 8, 3, DARK); for (const x of [9, 11, 14, 16]) a.put(x, 16, WHITE); a.put(10, 18, WHITE); a.put(15, 18, WHITE);   // roaring mouth
-    a.rect(11, 17, 4, 1, [200, 60, 90]);
+  // a plain deco tunnel of any length, for strips too short for the set pieces
+  function bakeDecoTunnel(L) {
+    const a = new Art(L, PLINTH + 4);
+    plinth(a, pick(['#3a6ac8', '#c4203e', '#2f9d5a', '#8a3ab8']), '#ffd84a');
     a.outline();
     return a.canvas();
   }
+
+  // ---- the monsters ----
+  // Comic-book creature-feature style: shaded in diagonal strokes, grimy, with glowing eyes and heavy brows.
+  // Spooky, not gory.
+  const EYE = [255, 236, 74];
+  // a few short diagonal strokes of mangy fur sticking out along an edge
+  function tufts(a, pts, c) { for (const [x, y, dx, dy] of pts) a.line(x, y, x + dx, y + dy, c); }
+
+  // the ape, roaring with a fist in the air, or (pounding) beating its chest
+  function bakeApe(pounding) {
+    const a = new Art(46, 62), fur = ramp('#4a3428'), skin = ramp('#9a7a5a'), G = a.h - PLINTH - 1;
+    plinth(a, '#2f9d5a', '#ffd84a');
+    a.hatch = true;
+    a.limb(30, G - 9, 32, G - 1, 5, 4.5, fur); a.ball(34, G - 1, 5, 2, fur);             // legs and feet
+    a.limb(17, G - 9, 14, G - 1, 5.5, 4.5, fur); a.ball(12, G - 1, 5, 2, fur);
+    a.limb(34, 17, 39, 27, 4.5, 4, fur); a.limb(39, 27, 39, 34, 4, 3.5, fur); a.ball(39, 35, 4, 3, skin);   // arm down
+    a.ball(23, 23, 13, 12, fur);                                                         // body
+    a.ball(19, 24, 7, 8, skin);                                                          // chest
+    a.line(14, 21, 18, 23, skin[4]); a.line(24, 21, 20, 23, skin[4]); a.line(19, 26, 18, 31, skin[3]);   // pecs and gut
+    if (pounding) {                                                                      // fist to the chest
+      a.limb(12, 17, 8, 24, 5, 4, fur); a.ball(13, 25, 4.5, 4, skin);
+      for (const k of [10, 12, 14]) a.put(k, 23, skin[4]);
+    } else {                                                                             // fist in the air
+      a.limb(12, 17, 7, 10, 5, 4, fur); a.limb(7, 10, 6, 6, 4, 3.5, fur); a.ball(6, 5, 4.5, 4, skin);
+      for (const k of [4, 6, 8]) a.put(k, 3, skin[4]);
+    }
+    a.ball(16, 11, 8.5, 7.5, fur);                                                       // head
+    a.ball(13, 14, 6.5, 4.5, skin);                                                      // muzzle
+    a.ball(23, 11, 2, 2.5, skin);                                                        // ear
+    a.rect(8, 8, 13, 2, fur[4]); a.line(9, 10, 12, 11, fur[4]); a.line(15, 11, 19, 10, fur[4]);   // a heavy, glowering brow
+    for (const [x, y] of [[11, 11], [12, 11], [17, 11], [18, 11]]) a.put(x, y, EYE);
+    a.put(12, 11, DARK); a.put(17, 11, DARK);
+    a.put(11, 14, DARK); a.put(14, 14, DARK);                                            // nostrils
+    a.rect(8, 16, 10, 3, DARK); a.rect(11, 17, 4, 1, [150, 50, 80]);                     // roaring mouth
+    for (const [x, y] of [[8, 16], [9, 17], [16, 16], [15, 17], [11, 16], [13, 16]]) a.put(x, y, WHITE);   // fangs
+    a.put(10, 18, WHITE); a.put(14, 18, WHITE);
+    tufts(a, [[10, 4, -2, -2], [14, 3, 0, -2], [19, 4, 2, -2], [33, 15, 3, -2], [35, 26, 3, 0], [11, 33, -3, 1], [30, 35, 3, 1], [24, 11, 3, -1]], fur[3]);
+    a.hatch = false;
+    a.grunge(17, a.h - PLINTH);
+    a.outline();
+    return a.canvas();
+  }
+  // the lizard: plated back, warty hide, a jagged roar
   function bakeLizard() {
-    const a = new Art(52, 56), sk = ramp('#4f8a5a'), belly = ramp('#c8c884'), plate = ramp('#bfe6c8'), G = a.h - PLINTH - 1;
+    const a = new Art(52, 62), sk = ramp('#3e5e3a'), belly = ramp('#a8a060'), plate = ramp('#d8e8b0'), G = a.h - PLINTH - 1;
     plinth(a, '#3a6ac8', '#fff3a8');
+    a.hatch = true;
     a.limb(30, G - 6, 41, G - 3, 6, 5, sk); a.limb(41, G - 3, 48, G - 9, 5, 3, sk); a.limb(48, G - 9, 49, G - 15, 3, 1.5, sk);   // tail
-    a.ball(29, G - 10, 8, 7, sk, true); a.limb(28, G - 7, 27, G - 1, 4.5, 4, sk); a.ball(25, G - 1, 5.5, 2, sk);              // back leg
+    a.ball(29, G - 10, 8, 7, sk); a.limb(28, G - 7, 27, G - 1, 4.5, 4, sk); a.ball(25, G - 1, 5.5, 2, sk);                    // back leg
     a.limb(20, G - 9, 18, G - 1, 4, 3.5, sk); a.ball(16, G - 1, 4.5, 2, sk);                                                  // front leg
-    // plates down its back, drawn before the body so the body overlaps their roots
+    for (const x of [21, 23, 25, 14, 16, 18]) a.put(x, G, WHITE);                                                             // claws
+    // plates down its back, drawn before the body so the body overlaps their roots, and down its tail
     for (let i = 0; i < 7; i++) {
       const x = 21 + i * 2.7, y = 4 + i * 4.4, s = 4.2 - i * 0.35;
       a.poly([[x - s * 0.6, y + s], [x + s * 0.4, y - s * 1.1], [x + s * 1.2, y + s * 0.6]], null, plate);
     }
-    a.ball(25, 23, 10, 13, sk, true);                                                    // body
+    for (const [x, y] of [[38, 33], [43, 33], [47, 28]]) a.poly([[x - 2, y + 2], [x, y - 2], [x + 2, y + 2]], null, plate);
+    a.ball(25, 23, 10, 13, sk);                                                          // body
     a.ball(20, 25, 5, 10, belly);
-    for (let y = 17; y < 35; y += 2) for (let x = 15; x < 26; x++) if (a.px[y * a.w + x] && a.px[y * a.w + x] !== sk[0]) { const c = a.px[y * a.w + x]; if (belly.includes(c)) a.put(x, y, belly[3]); }
+    for (let y = 17; y < 35; y += 2) for (let x = 15; x < 26; x++) { const c = a.px[y * a.w + x]; if (c && belly.includes(c)) a.put(x, y, belly[3]); }
     a.limb(22, 13, 16, 9, 6, 5, sk);                                                     // neck
-    a.ball(14, 8, 7, 5, sk, true);                                                       // head
-    a.poly([[3, 6], [13, 3], [15, 10], [4, 10]], null, sk);                              // snout
-    a.poly([[5, 13], [14, 12], [16, 16], [7, 16]], null, sk);                            // lower jaw
-    a.rect(5, 10, 10, 3, DARK); a.rect(7, 12, 7, 1, [200, 60, 90]);                     // roaring mouth
-    for (let x = 5; x < 14; x += 2) { a.put(x, 10, WHITE); a.put(x + 1, 13, WHITE); }
-    a.put(13, 5, [255, 214, 60]); a.put(12, 5, DARK); a.put(4, 7, DARK);
-    a.limb(18, 17, 12, 21, 2.5, 2, sk); a.put(11, 22, WHITE); a.put(12, 22, WHITE);      // little arms with claws
+    a.ball(14, 8, 7, 5, sk);                                                             // head
+    a.poly([[2, 6], [13, 3], [15, 10], [3, 10]], null, sk);                              // snout
+    a.poly([[4, 13], [14, 12], [16, 16], [6, 16]], null, sk);                            // lower jaw
+    a.rect(4, 10, 11, 3, DARK); a.rect(6, 12, 8, 1, [150, 50, 80]);                      // roaring mouth
+    for (let x = 4; x < 14; x += 2) { a.put(x, 10, WHITE); a.put(x + 1, 11, WHITE); a.put(x + 1, 12, WHITE); }   // jagged teeth
+    a.line(9, 3, 14, 4, sk[4]); a.put(13, 5, [255, 176, 0]); a.put(12, 5, DARK); a.put(3, 7, DARK);   // brow, burning eye, nostril
+    a.limb(18, 17, 12, 21, 2.5, 2, sk); a.put(11, 22, WHITE); a.put(12, 23, WHITE);      // little arms with claws
+    a.hatch = false;
+    a.grunge(29, a.h - PLINTH);
     a.outline();
     return a.canvas();
   }
+  // the werewolf, howling at the moon, mangy, with a torn ear
   function bakeWolf() {
-    const a = new Art(46, 56), fur = ramp('#7a7a98'), lite = ramp('#d0d0e4'), G = a.h - PLINTH - 1;
+    const a = new Art(46, 62), fur = ramp('#5a5a72'), lite = ramp('#a8a8c0'), G = a.h - PLINTH - 1;
     plinth(a, '#8a3ab8', '#ffd84a');
     a.ball(37, 7, 6, 6, ramp('#fff3c0'));                                                // the moon it's howling at
-    a.limb(31, G - 9, 41, G - 5, 3, 4.5, fur); a.ball(42, G - 5, 3.5, 3, lite);            // bushy tail
+    a.put(35, 6, [230, 220, 170]); a.put(38, 9, [230, 220, 170]); a.put(39, 5, [230, 220, 170]);
+    a.hatch = true;
+    a.limb(31, G - 9, 41, G - 5, 3, 4.5, fur); a.ball(42, G - 5, 3.5, 3, lite);           // bushy tail
     a.limb(19, G - 10, 16, G - 1, 4.5, 3.5, fur); a.limb(28, G - 10, 30, G - 1, 4.5, 3.5, fur);   // legs
     a.ball(15, G, 4, 1.5, lite); a.ball(31, G, 4, 1.5, lite);
-    a.ball(24, 24, 10, 11, fur, true);                                                   // body
+    a.ball(24, 24, 10, 11, fur);                                                         // body
     a.ball(19, 24, 6, 8, lite);                                                          // shaggy chest
-    for (let y = 18; y < 32; y += 3) a.put(17 + (y % 2), y, fur[3]);
-    a.limb(30, 17, 36, 24, 3.5, 3, fur); for (const x of [35, 37]) a.put(x, 27, WHITE);  // arms, claws out
-    a.limb(15, 18, 9, 12, 3.5, 3, fur); for (const x of [6, 8]) a.put(x, 10, WHITE);
+    for (let y = 18; y < 32; y += 3) a.line(16 + (y % 2), y, 18 + (y % 2), y + 2, fur[3]);
+    a.limb(30, 17, 36, 24, 3.5, 3, fur); for (const x of [35, 37, 39]) a.put(x, 27, WHITE);   // arms, claws out
+    a.limb(15, 18, 9, 12, 3.5, 3, fur); for (const x of [5, 7, 9]) a.put(x, 10, WHITE);
     a.limb(19, 15, 16, 10, 5, 4.5, fur);                                                  // neck
-    a.ball(16, 9, 6, 5.5, fur, true);                                                    // head, tipped back
+    a.ball(16, 9, 6, 5.5, fur);                                                          // head, tipped back
     a.limb(12, 6, 6, 1.5, 3.2, 2.2, fur);                                                 // snout, pointing up
-    a.put(5, 1, DARK); a.line(7, 4, 11, 8, DARK); a.put(9, 6, WHITE);                    // nose and open jaws
+    a.put(5, 1, DARK); a.line(7, 4, 11, 8, DARK); a.put(9, 6, WHITE); a.put(8, 5, WHITE);   // nose and open jaws
     a.poly([[17, 5], [20, -1], [21, 6]], null, fur); a.poly([[14, 4], [15, 0], [17, 5]], null, fur);   // ears
-    a.put(14, 8, [255, 214, 60]); a.put(15, 8, [255, 214, 60]);
+    a.put(19, 2, null); a.put(20, 3, null);                                              // a notch torn out of one
+    a.line(13, 7, 16, 6, fur[4]); a.put(14, 8, EYE); a.put(15, 8, EYE);
+    tufts(a, [[29, 14, 3, -2], [33, 19, 3, -1], [34, 29, 3, 1], [13, 21, -3, 0], [20, 4, 1, -2], [26, 31, 2, 2]], fur[3]);
+    a.hatch = false;
+    a.grunge(41, a.h - PLINTH);
     a.outline();
     return a.canvas();
   }
+  // the robot: rusty, riveted and dented, its antenna bent
   function bakeRobot() {
-    const a = new Art(42, 56), chrome = ramp('#9aa2c0'), joint = ramp('#4a4a66'), G = a.h - PLINTH - 1;
+    const a = new Art(42, 62), chrome = ramp('#8a8e9e'), joint = ramp('#3a3a50'), rust = hexRgb('#a0582a'), G = a.h - PLINTH - 1;
     plinth(a, '#c4203e', '#fffaf0');
+    a.hatch = true;
     a.box(8, G - 3, 11, 4, chrome); a.box(22, G - 3, 11, 4, chrome);                     // feet
     a.box(10, G - 12, 7, 9, chrome); a.box(24, G - 12, 7, 9, chrome);                    // legs
     a.box(9, G - 16, 24, 5, joint);                                                       // hips
     a.box(6, 11, 30, 16, chrome);                                                         // torso
     a.rect(10, 14, 13, 9, DARK);                                                          // chest panel (its lights blink)
     a.ball(29, 17, 3, 3, ramp('#ff3b5c'), true);
-    for (let x = 8; x < 35; x += 4) { a.put(x, 12, WHITE); a.put(x, 25, chrome[4]); }
+    for (let x = 8; x < 35; x += 4) { a.put(x, 12, WHITE); a.put(x, 25, chrome[4]); }   // rivets
+    for (const [x, y, n] of [[8, 13, 5], [24, 12, 7], [33, 18, 4], [12, 26, 3], [27, 37, 5]]) a.line(x, y, x + n * 0.4, y + n, rust);   // rust running down
+    a.line(25, 20, 30, 24, chrome[4]); a.line(26, 20, 31, 24, chrome[0]);                 // a dent
     a.ball(6, 13, 4.5, 4.5, chrome, true); a.ball(36, 13, 4.5, 4.5, chrome, true);        // shoulders
     a.box(2, 16, 6, 11, chrome); a.box(1, 27, 3, 4, joint); a.box(5, 27, 3, 4, joint);    // arm and pincer
     a.box(34, 16, 6, 11, chrome); a.box(34, 27, 6, 3, joint);
@@ -1028,12 +1198,15 @@
     a.box(12, 2, 18, 8, chrome);                                                          // head
     a.rect(13, 4, 16, 3, DARK);                                                           // visor (it scans)
     for (let x = 15; x < 28; x += 2) a.put(x, 8, DARK);
-    a.rect(20, 0, 1, 2, chrome[3]);
+    a.line(20, 1, 20, 0, chrome[3]); a.put(21, 0, chrome[3]);                             // bent antenna
+    a.hatch = false;
+    a.grunge(53, a.h - PLINTH);
+    for (let i = 0; i < 18; i++) { const x = 6 + ((i * 37) % 30), y = 11 + ((i * 53) % 16); if (a.px[y * a.w + x] && (i & 1)) a.put(x, y, rust); }   // rust spots
     a.outline();
     return a.canvas();
   }
   function bakeClown() {
-    const a = new Art(48, 56), face = ramp('#f6eadc'), hair = ramp('#ff5a2a'), red = ramp('#e8283e'), G = a.h - PLINTH - 1;
+    const a = new Art(48, 62), face = ramp('#f6eadc'), hair = ramp('#ff5a2a'), red = ramp('#e8283e'), G = a.h - PLINTH - 1;
     plinth(a, '#ffb000', '#3a6ac8');
     for (const [x, y, r] of [[6, 22, 7], [41, 22, 7], [9, 13, 5], [38, 13, 5], [5, 30, 5], [42, 30, 5]]) a.ball(x, y, r, r, hair, true);   // hair tufts
     a.ball(24, 23, 16, 16, face, true);                                                   // the face
@@ -1051,7 +1224,7 @@
     return a.canvas();
   }
   function bakeWindmill() {
-    const a = new Art(44, 56), wall = ramp('#e8443a'), roof = ramp('#6a4a3a'), G = a.h - PLINTH - 1;
+    const a = new Art(44, 62), wall = ramp('#e8443a'), roof = ramp('#6a4a3a'), G = a.h - PLINTH - 1;
     plinth(a, '#2f9d5a', '#fffaf0');
     a.poly([[11, G + 1], [15, 16], [29, 16], [33, G + 1]], null, wall);                    // the tower
     for (let y = 20; y < G; y += 4) for (let x = 12; x < 33; x++) if (a.px[y * a.w + x]) a.put(x, y, WHITE);   // painted planks
@@ -1065,12 +1238,12 @@
 
   // ---- the cities: each one's landmarks crowded together, big ----
   function bakeParis() {
-    const a = new Art(66, 56), G = a.h - PLINTH - 1, iron = ramp('#8a6a4a'), stone = ramp('#e8d8b8'), white = ramp('#f4efe4');
+    const a = new Art(66, 62), G = a.h - PLINTH - 1, iron = ramp('#8a6a4a'), stone = ramp('#e8d8b8'), white = ramp('#f4efe4');
     plinth(a, '#3a6ac8', '#fffaf0');
     // Sacré-Cœur behind
     a.ball(52, 15, 6, 7, white, true); a.ball(44, 20, 3, 3.5, white); a.ball(60, 20, 3, 3.5, white);
     a.box(51, 5, 3, 5, white); a.rect(52, 2, 1, 3, white[2]);
-    a.box(41, 19, 22, 10, white);
+    a.box(41, 19, 22, G - 18, white);   // (down to the roof)
     // the Eiffel Tower, oversized
     for (let y = 1; y <= G; y++) {
       const hw = 1.2 + Math.pow(y / G, 2.1) * 15.5;
@@ -1096,7 +1269,7 @@
     return a.canvas();
   }
   function bakeLondon() {
-    const a = new Art(68, 56), G = a.h - PLINTH - 1, sand = ramp('#d8b878'), wheel = hexRgb('#e8e8f4'), red = ramp('#e8283e');
+    const a = new Art(68, 62), G = a.h - PLINTH - 1, sand = ramp('#d8b878'), wheel = hexRgb('#e8e8f4'), red = ramp('#e8283e');
     plinth(a, '#2f9d5a', '#fffaf0');
     // the London Eye behind
     const ex = 36, ey = 19, R = 16;
@@ -1127,7 +1300,7 @@
     return a.canvas();
   }
   function bakeNewYork() {
-    const a = new Art(64, 56), G = a.h - PLINTH - 1, deco = ramp('#cfc4ae'), steel = ramp('#aab4c8'), green = ramp('#62b89a');
+    const a = new Art(64, 62), G = a.h - PLINTH - 1, deco = ramp('#cfc4ae'), steel = ramp('#aab4c8'), green = ramp('#62b89a');
     plinth(a, '#e8283e', '#fffaf0');
     // the Empire State Building
     a.box(27, 24, 14, G - 23, deco); a.box(29, 15, 10, 10, deco); a.box(31, 7, 6, 9, deco); a.box(32, 3, 4, 5, deco); a.rect(34, 0, 1, 3, deco[3]);
@@ -1155,10 +1328,10 @@
     return a.canvas();
   }
   function bakeItaly() {
-    const a = new Art(66, 56), G = a.h - PLINTH - 1, marble = ramp('#f2ecdc'), trav = ramp('#e0c48e');
+    const a = new Art(66, 62), G = a.h - PLINTH - 1, marble = ramp('#f2ecdc'), trav = ramp('#e0c48e');
     plinth(a, '#2f9d5a', '#e8283e');
     // St Peter's dome behind
-    a.ball(48, 16, 10, 10, ramp('#c8d0d8'), true); a.box(37, 16, 22, 8, marble); a.box(46, 3, 4, 4, marble); a.rect(48, 0, 1, 3, marble[3]);
+    a.ball(48, 16, 10, 10, ramp('#c8d0d8'), true); a.box(37, 16, 22, G - 15, marble); a.box(46, 3, 4, 4, marble); a.rect(48, 0, 1, 3, marble[3]);
     for (let x = 40; x < 57; x += 3) a.rect(x, 18, 1, 4, marble[4]);
     // the Colosseum: three rings of arches, the top broken away on the right
     for (let x = 20; x < 64; x++) {
@@ -1180,7 +1353,7 @@
     return a.canvas();
   }
   function bakeCairo() {
-    const a = new Art(66, 56), G = a.h - PLINTH - 1, sand = ramp('#e0b468'), stone = ramp('#d8a860');
+    const a = new Art(66, 62), G = a.h - PLINTH - 1, sand = ramp('#e0b468'), stone = ramp('#d8a860');
     plinth(a, '#c48a2a', '#3a6ac8');
     // two pyramids, lit on their left faces
     for (const [cx, top, hw] of [[24, 4, 22], [52, 16, 14]]) for (let y = top; y <= G; y++) {
@@ -1200,7 +1373,7 @@
     return a.canvas();
   }
   function bakeTokyo() {
-    const a = new Art(66, 56), G = a.h - PLINTH - 1, red = ramp('#e8442e'), wht = ramp('#f4ece0');
+    const a = new Art(66, 62), G = a.h - PLINTH - 1, red = ramp('#e8442e'), wht = ramp('#f4ece0');
     plinth(a, '#e8283e', '#fffaf0');
     // Mount Fuji behind, snow on top
     a.poly([[14, G + 1], [40, 8], [66, G + 1]], null, ramp('#5a6a9a'));
@@ -1230,25 +1403,39 @@
   }
 
   // Each one's lazily drawn picture, the name on its block, and what moves on it each frame.
+  // Each one's lazily drawn picture, its name, what moves on it all the time, and what it does while `on`
+  // (for a few seconds after a wheel goes in), with a shout to go with it.
+  const glow = (x, y, c, r = 2) => { for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { const d = Math.hypot(dx, dy); if (d <= r) { ctx.globalAlpha = 0.35 * (1 - d / (r + 0.5)); px(x + dx, y + dy, c); } } ctx.globalAlpha = 1; };
   const SETS = {
-    ape: { make: bakeApe },
-    lizard: { make: bakeLizard, anim: (x, y, t, p) => {   // now and then it breathes a glowing beam down the track
-      const k = ((t + p.ph) % 5) / 5;
-      if (k > 0.78) for (let i = 0; i < 30; i++) {
+    ape: { make: () => { const c = bakeApe(false); c.alt = bakeApe(true); return c; }, shout: 'GRR!',   // it pounds its chest
+      anim: (x, y, t, p, on) => { if (on) { glow(x + 11, y + 11, '#ffe94a'); glow(x + 17, y + 11, '#ffe94a'); } } },
+    lizard: { make: bakeLizard, shout: 'ROAR', anim: (x, y, t, p, on) => {   // it breathes a glowing beam down the track
+      if (!on && ((t + p.ph) % 7) / 7 < 0.88) return;
+      for (let i = 0; i < 30; i++) {
         if (Math.random() < 0.25) continue;
         px(x + 3 - i, y + 11 + Math.round(Math.sin(i * 0.9 + t * 20) * (i / 14)), i < 6 ? '#ffffff' : i & 1 ? '#3ff8ff' : '#bff6ff');
       }
+      for (let i = 0; i < 7; i++) glow(x + 21 + i * 2.7, y + 3 + i * 4.4, '#3ff8ff', 2);   // its plates glow
     } },
-    wolf: { make: bakeWolf, anim: (x, y, t) => { if (Math.floor(t * 1.3) & 1) { px(x + 14, y + 8, '#ff3b5c'); px(x + 15, y + 8, '#ff3b5c'); } } },
-    robot: { make: bakeRobot, anim: (x, y, t) => {   // the visor scans and the chest panel blinks
-      px(x + 13 + Math.round((Math.sin(t * 2.5) + 1) * 7.5), y + 5, '#ff3b5c');
-      for (let i = 0; i < 6; i++) if ((Math.floor(t * 4) + i * 3) % 5 < 2) px(x + 11 + (i % 3) * 4, y + 16 + Math.floor(i / 3) * 4, ['#3ff8ff', '#ffe600', '#2fd06a'][i % 3]);
+    wolf: { make: bakeWolf, shout: 'AWOO', anim: (x, y, t, p, on) => {   // eyes glow; howling, the moon lights up
+      if (on || Math.floor(t * 1.3) & 1) { px(x + 14, y + 8, '#ffec5a'); px(x + 15, y + 8, '#ffec5a'); glow(x + 14, y + 8, '#ffec5a'); }
+      if (on) glow(x + 37, y + 7, '#fff3c0', 7);
     } },
-    clown: { make: bakeClown, anim: (x, y, t) => { if (Math.floor(t * 2) & 1) { px(x + 23, y + 25, '#ffffff'); } } },
-    windmill: { make: bakeWindmill, city: 'HOLLAND', anim: (x, y, t) => {   // the sails turn
+    robot: { make: bakeRobot, shout: 'BEEP', anim: (x, y, t, p, on) => {   // the visor scans and the chest panel blinks, fast when it's on
+      const sp = on ? 9 : 2.5;
+      px(x + 13 + Math.round((Math.sin(t * sp) + 1) * 7.5), y + 5, '#ff3b5c'); if (on) glow(x + 13 + Math.round((Math.sin(t * sp) + 1) * 7.5), y + 5, '#ff3b5c');
+      for (let i = 0; i < 6; i++) if ((Math.floor(t * (on ? 14 : 4)) + i * 3) % 5 < 2) px(x + 11 + (i % 3) * 4, y + 16 + Math.floor(i / 3) * 4, ['#3ff8ff', '#ffe600', '#2fd06a'][i % 3]);
+      if (on && Math.floor(t * 12) & 1) { px(x + 20, y - 1, '#3ff8ff'); px(x + 19, y, '#bff6ff'); px(x + 21, y, '#bff6ff'); }   // sparks off its antenna
+    } },
+    clown: { make: bakeClown, shout: 'HONK', anim: (x, y, t, p, on) => {   // its nose lights up and honks
+      if (on ? Math.floor(t * 8) & 1 : Math.floor(t * 2) & 1) px(x + 23, y + 25, '#ffffff');
+      if (on) glow(x + 24, y + 26, '#ff3b5c', 5);
+    } },
+    windmill: { make: bakeWindmill, city: 'HOLLAND', anim: (x, y, t, p, on) => {   // the sails turn, racing when it's on
       const hx = x + 22, hy = y + 12;
+      p.sail = (p.sail ?? 0) + (on ? 0.12 : 0.02);
       for (let k = 0; k < 4; k++) {
-        const a = t * 1.2 + k * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
+        const a = p.sail + k * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
         for (let s = 2; s <= 17; s++) {
           px(Math.round(hx + ca * s), Math.round(hy + sa * s), '#5a3a2a');
           if (s > 5) for (let w = 1; w <= 3; w++) px(Math.round(hx + ca * s - sa * w), Math.round(hy + sa * s + ca * w), (s + w) & 1 ? '#fffaf0' : '#d8cfbe');
@@ -1256,48 +1443,74 @@
       }
       ctx.fillStyle = '#3a2a20'; ctx.fillRect(hx - 1, hy - 1, 3, 3);
     } },
-    paris: { make: bakeParis, city: 'PARIS', anim: (x, y, t) => { if (Math.floor(t * 2) & 1) px(x + 16, y + 1, '#ff3b5c'); } },
-    london: { make: bakeLondon, city: 'LONDON', anim: (x, y, t) => {   // Big Ben's hands go round (fast)
-      for (const [r, sp] of [[3, 0.5], [2, 0.04]]) { const g = t * sp * Math.PI * 2; for (let s = 1; s <= r; s++) px(x + 8 + Math.round(Math.sin(g) * s), y + 11 - Math.round(Math.cos(g) * s), '#1f1830'); }
+    paris: { make: bakeParis, city: 'PARIS', anim: (x, y, t, p, on) => {   // the Eiffel Tower lights up
+      if (Math.floor(t * 2) & 1) px(x + 16, y + 1, '#ff3b5c');
+      if (on) for (let i = 0; i < 14; i++) { const yy = 3 + ((i * 11 + Math.floor(t * 12)) % 36), hw = 1 + Math.pow(yy / 41, 2.1) * 14; px(x + 16 + Math.round(((i * 7) % 11 - 5) / 5 * hw), y + yy, '#fff3a8'); }
     } },
-    newyork: { make: bakeNewYork, city: 'NEW YORK', anim: (x, y, t) => {   // the torch flickers
+    london: { make: bakeLondon, city: 'LONDON', shout: 'BONG', anim: (x, y, t, p, on) => {   // Big Ben's hands go round, fast as it chimes
+      for (const [r, sp] of [[3, on ? 4 : 0.5], [2, on ? 0.4 : 0.04]]) { const g = t * sp * Math.PI * 2; for (let s = 1; s <= r; s++) px(x + 8 + Math.round(Math.sin(g) * s), y + 11 - Math.round(Math.cos(g) * s), '#1f1830'); }
+      if (on) glow(x + 8, y + 11, '#fff3a8', 6);
+    } },
+    newyork: { make: bakeNewYork, city: 'NEW YORK', anim: (x, y, t, p, on) => {   // the torch flickers, and blazes when it's on
       px(x + 16, y + 1, Math.floor(t * 9) & 1 ? '#ff8a20' : '#ffe600'); px(x + 16 + (Math.floor(t * 7) & 1), y, '#ffe600');
+      if (on) { glow(x + 16, y + 1, '#ffb000', 4); px(x + 16, y - 1, '#fff3a8'); px(x + 17, y - 2, '#ffe600'); }
     } },
-    italy: { make: bakeItaly, city: 'ITALIA' },
-    cairo: { make: bakeCairo, city: 'CAIRO' },
-    tokyo: { make: bakeTokyo, city: 'TOKYO', anim: (x, y, t) => { if (Math.floor(t * 1.5) & 1) px(x + 12, y + 1, '#ff3b5c'); } },
+    italy: { make: bakeItaly, city: 'ITALIA', shout: 'BRAVO' },
+    cairo: { make: bakeCairo, city: 'CAIRO', anim: (x, y, t, p, on) => {   // the Sphinx's eyes glow
+      if (on) { glow(x + 26, y + 22, '#3ff8ff'); glow(x + 29, y + 22, '#3ff8ff'); px(x + 26, y + 22, '#bff6ff'); px(x + 29, y + 22, '#bff6ff'); }
+    } },
+    tokyo: { make: bakeTokyo, city: 'TOKYO', anim: (x, y, t, p, on) => {   // cherry blossom falls
+      if (Math.floor(t * 1.5) & 1) px(x + 12, y + 1, '#ff3b5c');
+      if (on) for (let i = 0; i < 16; i++) {
+        const k = (t * 0.6 + i * 0.137) % 1;
+        px(x + 4 + ((i * 29) % 58) + Math.round(Math.sin(t * 3 + i) * 2), y + 2 + Math.round(k * 38), i & 1 ? '#ffb3d9' : '#ffd8ec');
+      }
+    } },
+    // the slot machine: its cabinet stands on the base and is drawn live, for the reels and lights
+    slots: { make: () => { const a = new Art(40, 62); plinth(a, '#c4203e', '#ffd84a'); a.outline(); return a.canvas(); },
+      anim: (x, y, t, p) => drawSlots(p, x + 20, y + 62 - PLINTH - 28, t) },
   };
 
-  // In front of the wheels: tunnel bodies (the wheels go out of sight inside) and glass pipes (they don't).
+  // Behind the track: the tunnels themselves (everything but their arch heads), and what moves on them.
+  function drawBacks(cx, t) {
+    for (const p of pieces) if (p.type === 'tunnel' && p.x1 > cx - 10 && p.x0 < cx + W + 10) {
+      const s = SETS[p.set], x = Math.round(p.ax - cx), y = BASE + 4 - p.art.height;
+      const on = p.active != null && simT - p.active < 2.5;   // a wheel just went in: the scene plays
+      ctx.drawImage(on && p.art.alt && Math.floor(t * 7) & 1 ? p.art.alt : p.art, x, y);
+      if (s?.anim) s.anim(x, y, t, p, on);
+      if (on && s?.city) for (let i = 0; i < 6; i++) {   // the cities twinkle
+        const sx = x + 4 + ((i * 37 + Math.floor(t * 9) * 13) % (p.art.width - 8)), sy = y + 2 + ((i * 23 + Math.floor(t * 9) * 7) % (p.art.height - PLINTH - 4));
+        px(sx, sy, '#fffbe0'); px(sx - 1, sy, 'rgba(255,240,180,0.6)'); px(sx + 1, sy, 'rgba(255,240,180,0.6)'); px(sx, sy - 1, 'rgba(255,240,180,0.6)'); px(sx, sy + 1, 'rgba(255,240,180,0.6)');
+      }
+    }
+  }
+
+  // In front of the wheels: tunnel facades, arches and glass pipes.
   function drawFront(cx, t) {
     for (const p of pieces) {
       if (p.x1 < cx - 10 || p.x0 > cx + W + 10) continue;
-      if (p.type === 'arch') drawArch(p, cx, t);
-      else if (p.type === 'tunnel' && p.set) {
-        // a set piece: its picture sits on the track's bottom edge, then whatever moves on it, and the
-        // name painted on its block
+      if (p.type === 'arch') drawArch(p, cx, t, 'front');
+      else if (p.type === 'tunnel') {
+        // its front wall, and its name on a dark plaque with a gold rim, so it reads over anything
         const s = SETS[p.set], x = Math.round(p.ax - cx), y = BASE + 4 - p.art.height;
-        ctx.drawImage(p.art, x, y);
-        if (s.anim) s.anim(x, y, t, p);
-        if (s.city) drawText(s.city, x + (p.art.width >> 1), y + p.art.height - PLINTH + 5, '#fffaf0');
-      } else if (p.type === 'tunnel') {
-        const a = p.ta - cx, b = p.tb - cx, top = BASE - 15;
-        // the body: dark brickwork with a row of lights along the top
-        ctx.fillStyle = '#2a2236'; ctx.fillRect(a, top, b - a, BASE + 4 - top);
-        ctx.fillStyle = '#3a3046';
-        for (let y = top + 1; y < BASE + 4; y += 3) ctx.fillRect(a, y, b - a, 1);
-        for (let y = top; y < BASE + 4; y += 3) for (let x = a + ((y / 3) & 1) * 3; x < b; x += 6) px(x, y + 1, '#3a3046'), px(x, y + 2, '#3a3046');
-        for (let x = a + 3; x < b - 2; x += 5) px(x, top - 1, (Math.floor(x / 5) + Math.floor(t * 4)) % 3 ? '#ffd84a' : '#fff3a8');
-        // stone portals at each end, round-topped
-        for (const [x0, dir] of [[a, 1], [b, -1]]) {
-          for (let dy = 0; dy < BASE + 4 - top + 3; dy++) {
-            const y = top - 3 + dy, edge = dy < 2;
-            ctx.fillStyle = edge ? '#a89cb8' : dy & 1 ? '#7a6e8a' : '#8a7e9a';
-            ctx.fillRect(dir > 0 ? x0 - 3 : x0, y, 3, 1);
-          }
-          px(dir > 0 ? x0 - 2 : x0 + 1, top - 4, '#a89cb8');
+        ctx.drawImage(p.art.front, x, y);
+        if (s?.city) {
+          const w = s.city.length * 4 + 5, mx = x + (p.art.width >> 1), ty = y + p.art.height - PLINTH + 1;
+          ctx.fillStyle = '#ffd84a'; ctx.fillRect(mx - (w >> 1) - 1, ty - 2, w + 2, 9);
+          ctx.fillStyle = '#1f1830'; ctx.fillRect(mx - (w >> 1), ty - 1, w, 7);
+          drawText(s.city, mx, ty, '#fffaf0');
         }
-      } else if (p.type === 'pipe') {
+      } else if (p.type === 'loop') {
+        // the loop's front rail, so the wheel runs between it and the back one
+        const steps = Math.ceil(2 * Math.PI * (p.R + 1) * 1.6);
+        ctx.globalAlpha = 0.85;
+        for (let i = 0; i <= steps; i++) {
+          const th = i / steps * Math.PI * 2;
+          px(Math.round(p.ex + Math.sin(th) * (p.R + 0.6)) - cx, Math.round(BASE - p.R + Math.cos(th) * (p.R + 0.6)), i % 10 < 2 ? C.dark : C.top);
+        }
+        ctx.globalAlpha = 1;
+      } else if (p.lanes && p.frontLane != null) drawLane(p, cx, p.lanes[p.frontLane], true);
+      else if (p.type === 'pipe') {
         // a glass tube: tinted inside, bright rims top and bottom, a sheen, joints and flanged ends
         const a = Math.round(p.x0 - cx), b = Math.round(p.x1 - cx), top = BASE - 13;
         ctx.fillStyle = 'rgba(160,230,255,0.12)'; ctx.fillRect(a, top, b - a, 13);
@@ -1334,14 +1547,13 @@
   function sprite(rows, x, y) {
     rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') px(x + i, y + j, SPR_C[row[i]]); });
   }
-  // A slot machine up on two chrome legs over the track: a lit 777 topper, chasing bulbs (faster after a
-  // jackpot), three reels shaded to look curved behind the glass with a payline, buttons, a coin slot, a
-  // coin tray and a lever that's pulled while the reels spin.
-  function drawSlots(p, cx, t) {
-    const x = p.cx - cx, top = BASE - 44, spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
+  // The slot machine's cabinet (centred on x, its top at `top`, standing on its tunnel base): a lit 777
+  // topper, chasing bulbs (faster after a jackpot), three reels shaded to look curved behind the glass with
+  // a payline, buttons, a coin slot, a coin tray and a lever that's pulled while the reels spin.
+  function drawSlots(p, x, top, t) {
+    const spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
     const chase = Math.floor(t * (hot ? 16 : 5));
     const rect = (c, a, b, w, h) => { ctx.fillStyle = c; ctx.fillRect(x + a, top + b, w, h); };
-    for (const lx of [-15, 14]) { rect('#d8d8e8', lx, 28, 1, 16); rect('#8a8aa0', lx + 1, 28, 1, 16); }
     // the cabinet, lit from the left, with chrome trim
     rect('#c4203e', -15, 8, 31, 20); rect('#e04a5e', -15, 8, 2, 20); rect('#8e1530', 14, 8, 2, 20);
     rect('#d8d8e8', -15, 8, 31, 1); rect('#8a8aa0', -15, 27, 31, 1);
@@ -1728,7 +1940,21 @@
     ctx.globalAlpha = 1;
   }
 
+  // ---- searchlights: a few beams swinging slowly across the sky from behind the skyline ----
+  function searchlights(t) {
+    const par = 0.08, off = camX * par, gap = 150, len = Math.min(80, ROWS - 6);
+    ctx.fillStyle = 'rgba(255,248,210,0.08)';
+    for (let k = Math.floor((off - 60) / gap); k * gap - off < W + 60; k++) {
+      const bx = k * gap - off + 40, a = -Math.PI / 2 + Math.sin(t * 0.45 + k * 1.9) * 0.5;
+      const ex = bx + Math.cos(a) * len, ey = BASE + 2 + Math.sin(a) * len, nx = -Math.sin(a), ny = Math.cos(a);
+      ctx.beginPath(); ctx.moveTo(bx - 1, BASE + 2); ctx.lineTo(bx + 1, BASE + 2);
+      ctx.lineTo(ex + nx * 6, ey + ny * 6); ctx.lineTo(ex - nx * 6, ey - ny * 6); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(bx, BASE + 2); ctx.lineTo(ex + nx * 2, ey + ny * 2); ctx.lineTo(ex - nx * 2, ey - ny * 2); ctx.closePath(); ctx.fill();
+    }
+  }
+
   function drawScenery(t, dt) {
+    searchlights(t);
     fireworks(dt);
     for (const L of LAYERS) {
       fillLayer(L);
@@ -1773,7 +1999,7 @@
     P: '##.|#.#|##.|#..|#..', S: '.##|#..|.#.|..#|##.', T: '###|.#.|.#.|.#.|.#.', U: '#.#|#.#|#.#|#.#|###',
     D: '##.|#.#|#.#|#.#|##.', E: '###|#..|##.|#..|###', G: '.##|#..|#.#|#.#|.##', I: '###|.#.|.#.|.#.|###',
     L: '#..|#..|#..|#..|###', R: '##.|#.#|##.|#.#|#.#', V: '#.#|#.#|#.#|#.#|.#.', W: '#.#|#.#|###|###|#.#',
-    Y: '#.#|#.#|.#.|.#.|.#.',
+    Y: '#.#|#.#|.#.|.#.|.#.', H: '#.#|#.#|###|#.#|#.#', F: '###|#..|##.|#..|#..',
   };
   function drawText(str, x, y, c) {
     const chars = [...str], x0 = Math.round(x - (chars.length * 4 - 1) / 2), y0 = Math.round(y);
@@ -1797,11 +2023,83 @@
     const o = cover(dx, dy, RW);
     if (o > 0) WHEEL_PX.push({ dx, dy, o, i: cover(dx, dy, HUB_R) });
   }
+  // Lamp posts along the track: an iron post with two curled arms holding glowing globes, every 72 px of
+  // track where it runs flat for a stretch (never on ramps, loops or under the set pieces).
+  const LAMP_GAP = 72, GLOW_PX = [];
+  for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++) {
+    const d = Math.hypot(dx, dy); if (d <= 7) GLOW_PX.push({ dx, dy, a: 0.22 * (1 - d / 7) ** 2 });
+  }
+  const flatAt = x => pieceAt(x)?.type === 'flat';
+  const lampAt = x => ((x % LAMP_GAP) + LAMP_GAP) % LAMP_GAP === 0 && flatAt(x - 6) && flatAt(x) && flatAt(x + 6);
+  function drawLamps(cx, t) {
+    for (let wx = Math.ceil((cx - 10) / LAMP_GAP) * LAMP_GAP; wx < cx + W + 10; wx += LAMP_GAP) {
+      if (!lampAt(wx)) continue;
+      const x = wx - cx, y = BASE - 1, flick = 0.85 + 0.15 * Math.sin(t * 9 + wx);
+      for (const gx of [x - 3, x + 3]) for (const q of GLOW_PX) { ctx.globalAlpha = q.a * flick; px(gx + q.dx, y - 13 + q.dy, '#ffe9a0'); }
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(x - 1, y - 1, 3, 2); ctx.fillRect(x, y - 15, 1, 15);   // base and post
+      ctx.fillStyle = '#4a4660'; ctx.fillRect(x - 1, y - 2, 3, 1); px(x, y - 8, '#4a4660');
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(x - 3, y - 16, 7, 1); px(x - 3, y - 15, '#2a2236'); px(x + 3, y - 15, '#2a2236');   // arms
+      px(x, y - 17, '#ffd84a');                                                                     // finial
+      for (const gx of [x - 3, x + 3]) {                                                            // the globes
+        ctx.fillStyle = '#fff3c0'; ctx.fillRect(gx - 1, y - 14, 3, 3); px(gx, y - 13, '#ffffff'); px(gx - 1, y - 14, '#ffe9a0');
+      }
+    }
+  }
+
+  // Velvet ropes along the empty flat stretches, behind the track, like a theatre queue. Every flat spot
+  // on the 12 px grid has a post, a brass one or a lamp post, and a rope only hangs between two of them.
+  const ROPE_GAP = 12;
+  function drawRopes(cx) {
+    for (let wx = Math.ceil((cx - ROPE_GAP) / ROPE_GAP) * ROPE_GAP; wx < cx + W + ROPE_GAP; wx += ROPE_GAP) {
+      if (!flatAt(wx)) continue;
+      const x = wx - cx, y = BASE - 1;
+      if (!lampAt(wx)) {
+        ctx.fillStyle = '#b8902e'; ctx.fillRect(x - 1, y, 3, 1); ctx.fillRect(x, y - 5, 1, 5);
+        px(x, y - 6, '#ffe08a'); px(x, y - 5, '#e8c060');
+      }
+      if (!flatAt(wx + ROPE_GAP) || !flatAt(wx + ROPE_GAP / 2)) continue;
+      for (let i = 1; i < ROPE_GAP; i++) {
+        const ry = Math.round(y - 5 + Math.sin(Math.PI * i / ROPE_GAP) * 2.4);
+        px(x + i, ry, '#b8203a'); if (i & 1) px(x + i, ry - 1, 'rgba(255,120,140,0.5)');
+      }
+    }
+  }
+
+  // ---- foreground silhouettes: things nearest the viewer, along the bottom edge ----
+  // Trash cans, benches and people, dark against everything, sliding by a little faster than the track
+  // (they're closer). Spaced well apart and no taller than a wheel, so they never hide much.
+  const FG = { par: 1.35, items: [], next: 40 };
+  const FG_KINDS = ['can', 'bench', 'person', 'person', 'couple', 'kid'];
+  function drawForeground() {
+    const off = camX * FG.par, y = H - 1;
+    while (FG.items.length && FG.items[0].x + 20 < off) FG.items.shift();
+    while (FG.next < off + W + 30) { FG.items.push({ x: FG.next, kind: pick(FG_KINDS), tall: ri(0, 1) }); FG.next += ri(110, 260); }
+    ctx.globalAlpha = 0.92; ctx.fillStyle = '#0b0614';
+    const r = (x, yy, w, h) => ctx.fillRect(x, yy, w, h);
+    const person = (x, h) => { r(x, y - h + 1, 3, 3); r(x - 1, y - h + 4, 5, 1); r(x, y - h + 4, 3, h - 7); r(x, y - 2, 1, 3); r(x + 2, y - 2, 1, 3); };
+    for (const it of FG.items) {
+      const x = Math.round(it.x - off);
+      if (x < -20 || x > W + 20) continue;
+      if (it.kind === 'can') { r(x - 1, y - 7, 7, 1); r(x, y - 6, 5, 7); }
+      else if (it.kind === 'bench') { r(x, y - 7, 13, 1); r(x, y - 5, 13, 1); r(x, y - 3, 13, 2); r(x + 1, y - 1, 1, 2); r(x + 11, y - 1, 1, 2); r(x, y - 7, 1, 5); r(x + 12, y - 7, 1, 5); }
+      else if (it.kind === 'person') person(x, 9 + it.tall);
+      else if (it.kind === 'couple') { person(x, 10); person(x + 4, 9); r(x + 3, y - 5, 1, 1); }
+      else { person(x, 7); r(x + 3, y - 14, 1, 9); r(x + 2, y - 18, 3, 4); r(x + 3, y - 19, 1, 1); }   // a kid with a balloon
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  const HALO_PX = [];
+  for (let dy = -RW - 3; dy <= RW + 3; dy++) for (let dx = -RW - 3; dx <= RW + 3; dx++) {
+    const d = Math.hypot(dx, dy);
+    if (d > RW - 0.2 && d <= RW + 3.2) HALO_PX.push({ dx, dy, a: 0.42 * Math.pow(1 - (d - RW + 0.2) / 3.4, 1.5) });
+  }
   function drawWheel(w, cx) {
     const wx = Math.round(w.x) - cx, wy = Math.round(w.y), P = w.pal;
     // shadow while airborne
     if (w.mode === 'air') {
-      const gy = groundAt(w.x);
+      const gy = groundFor(w, w.x);
       if (gy != null) {
         const hgt = gy - (w.y + RW), sw = Math.max(1, 5 - (hgt / 12 | 0));
         ctx.fillStyle = C.shadow; ctx.fillRect(wx - (sw >> 1), Math.round(gy), sw, 1);
@@ -1816,6 +2114,9 @@
       });
       ctx.globalAlpha = 1;
     }
+    // a soft glow round it in its own color, fading out over a few pixels
+    for (const q of HALO_PX) { ctx.globalAlpha = q.a; px(wx + q.dx, wy + q.dy, P.main); }
+    ctx.globalAlpha = 1;
     for (const q of WHEEL_PX) {
       ctx.globalAlpha = q.o; px(wx + q.dx, wy + q.dy, C.tire);
       if (q.i > 0) { ctx.globalAlpha = q.o * q.i; px(wx + q.dx, wy + q.dy, P.rim); }
@@ -2000,14 +2301,16 @@
       const sx = (slotX(r) - cx) * SCALE;
       const left = clamp(sx - 3 * PXS - 6, 4, innerWidth - r.bw - 4);
       const y = Math.max(4 + PXS, r.by - r.bh - TAIL);
-      b.style.transform = `translate(${left.toFixed(1)}px,${y.toFixed(1)}px)`;
+      // (placed with `translate`, which applies after the grow-in scale, so a bubble grows where it is
+      // rather than sweeping in from the corner of the screen)
+      b.style.translate = `${left.toFixed(1)}px ${y.toFixed(1)}px`;
       // from the bubble's bottom edge, above the wheel where it can be, to just over the wheel itself
       const wx = (r.x - cx) * SCALE, wy = top0 + (r.y - RW - 1.5) * SCALE;
       const ax = clamp(wx, left + 3 * PXS, left + r.bw - 3 * PXS), ay = y + r.bh + PXS;
       b.style.setProperty('--ox', (ax - left).toFixed(1) + 'px');
       DOTS.forEach((d, i) => {
         const dx = ax + (wx - ax) * d.at - d.size / 2, dy = ay + (wy - ay) * d.at - d.size / 2;
-        r.dots[i].style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px)`;
+        r.dots[i].style.translate = `${dx.toFixed(1)}px ${dy.toFixed(1)}px`;
       });
     }
   }
@@ -2106,11 +2409,15 @@
     ctx.clearRect(0, 0, W, H);
     if (CFG.scenery) drawScenery(t, dt);
     if (CFG.decor) drawDecor(t);
+    drawBacks(cx, t);
     drawTrack(cx, t);
+    drawRopes(cx);
+    drawLamps(cx, t);
     for (const q of parts) px(Math.round(q.x) - cx, Math.round(q.y), q.c);
     for (const r of riders) if (!r.deadUntil) drawWheel(r, cx);
     drawWheel(wh, cx);
     drawFront(cx, t);
+    if (CFG.scenery) drawForeground();
     for (const q of rings) {
       ctx.globalAlpha = Math.min(1, q.l / 0.2);
       for (let i = 0; i < 24; i++) px(Math.round(q.x + Math.cos(i / 24 * 6.283) * q.r) - cx, Math.round(q.y + Math.sin(i / 24 * 6.283) * q.r), '#fff3a8');
