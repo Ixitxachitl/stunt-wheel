@@ -65,10 +65,10 @@
     background:var(--c);color:var(--ink);box-shadow:inset 0 -2px 0 0 rgba(0,0,0,.25)}
   .bub .act{font-style:italic}
   .bub img{height:1.6em;vertical-align:middle;margin:-.1em .1em}
-  /* the tail: two squares stepping down to the wheel, at --tx along the bottom */
-  .bub::before,.bub::after{content:"";position:absolute;background:#fffaf0;box-shadow:var(--vx)}
-  .bub::before{left:var(--tx,12px);bottom:calc(-4 * var(--p));width:calc(2 * var(--p));height:calc(2 * var(--p))}
-  .bub::after{left:calc(var(--tx,12px) - var(--p));bottom:calc(-7 * var(--p));width:var(--p);height:var(--p)}
+  /* the tail: shrinking squares spaced out along the line from the bubble to its wheel */
+  .bub-dot{position:fixed;left:0;top:0;background:#fffaf0;box-shadow:var(--vx);pointer-events:none;
+    will-change:transform;opacity:0;transition:opacity .3s}
+  .bub-dot.show{opacity:1}
 
   /* ---------- settings window (only visible while you interact with the source) ---------- */
   /* Track colors: an orange girder header with the ramps' red-and-white stripes, and boost-pad blue. */
@@ -513,6 +513,7 @@
   root.style.setProperty('--p', PXS + 'px');
   root.style.setProperty('--ts', CFG.textsize + 'px');
   const TAIL = PXS * 8;                         // room under a bubble for its tail
+  const DOTS = [[0.22, 2], [0.5, 1.5], [0.78, 1]].map(([at, k]) => ({ at, size: Math.round(PXS * k) }));
   const queue = new Map();                      // key -> message, chatters waiting for a wheel
   let lastSpawn = -Infinity;
 
@@ -576,8 +577,15 @@
     if (!r.bub) {
       r.bub = document.createElement('div'); r.bub.className = 'bub';
       r.bub.style.setProperty('--c', r.pal.main);
+      r.dots = DOTS.map(d => {
+        const el = document.createElement('div'); el.className = 'bub-dot';
+        el.style.width = el.style.height = d.size + 'px';
+        document.body.appendChild(el);
+        return el;
+      });
       document.body.appendChild(r.bub);
     }
+    r.dots.forEach(el => el.classList.add('show'));
     const b = r.bub;
     b.textContent = '';
     if (CFG.names) { const n = document.createElement('b'); n.textContent = m.name; b.appendChild(n); }
@@ -606,26 +614,37 @@
   if (document.fonts) document.fonts.addEventListener('loadingdone', () => riders.forEach(measure));
 
   // A bubble stays over its wheel's parking spot, and only follows the track's height there, easing up
-  // and down hills. While the wheel is in the air or going round a loop the bubble holds still.
+  // and down hills. While the wheel is in the air or going round a loop the bubble holds still, and its
+  // tail stretches out to keep pointing at the wheel.
   function placeBubbles(cx, dt, now) {
     const top0 = innerHeight - H * SCALE;
     for (const r of riders) {
       const b = r.bub;
       if (!b) continue;
-      if (now > r.sayUntil) { b.classList.remove('show'); continue; }
+      if (now > r.sayUntil) { b.classList.remove('show'); r.dots.forEach(el => el.classList.remove('show')); continue; }
       if (r.mode === 'ground' || r.ty == null) r.ty = top0 + (r.y - RW - 2) * SCALE;
       r.by = r.by == null ? r.ty : r.by + (r.ty - r.by) * Math.min(1, dt * 3);
       const sx = (slotX(r) - cx) * SCALE;
       const left = clamp(sx - 3 * PXS - 6, 4, innerWidth - r.bw - 4);
       const y = Math.max(4 + PXS, r.by - r.bh - TAIL);
       b.style.transform = `translate(${left.toFixed(1)}px,${y.toFixed(1)}px)`;
-      b.style.setProperty('--tx', clamp(sx - left - PXS, 2 * PXS, r.bw - 3 * PXS).toFixed(1) + 'px');
+      // from the bubble's bottom edge, above the wheel where it can be, to just over the wheel itself
+      const wx = (r.x - cx) * SCALE, wy = top0 + (r.y - RW - 1.5) * SCALE;
+      const ax = clamp(wx, left + 3 * PXS, left + r.bw - 3 * PXS), ay = y + r.bh + PXS;
+      DOTS.forEach((d, i) => {
+        const dx = ax + (wx - ax) * d.at - d.size / 2, dy = ay + (wy - ay) * d.at - d.size / 2;
+        r.dots[i].style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px)`;
+      });
     }
   }
 
   function removeRider(r) {
     riders.splice(riders.indexOf(r), 1);
-    if (r.bub) { const b = r.bub; b.classList.remove('show'); setTimeout(() => b.remove(), 400); }
+    if (r.bub) {
+      const els = [r.bub, ...r.dots];
+      els.forEach(el => el.classList.remove('show'));
+      setTimeout(() => els.forEach(el => el.remove()), 400);
+    }
   }
   function clearRiders() { [...riders].forEach(removeRider); queue.clear(); }
 
