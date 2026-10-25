@@ -243,20 +243,26 @@
   // The streamer's wheel (wh) sets the camera; chatters' wheels (riders) share the same track and physics.
   const wheel = (x, cruise, pal) => ({ x, y: BASE - RW, v: cruise, vx: 0, vy: 0, mode: 'ground', rot: 0,
     boostT: 0, loop: null, th: 0, v0: 0, gvy: null, trail: [], cruise, pal });
-  const wh = wheel(20, CRUISE, MAIN_PAL);
+  const wh = Object.assign(wheel(20, CRUISE, MAIN_PAL), { main: true });
   const riders = [];
   const parts = [];
   const rings = [];   // explosion shock rings
   const pops = [];    // floating pixel text: scores, BOOM, JACKPOT
-  function popup(x, y, text, c) { pops.push({ x, y, text, c, l: 1.2 }); }
+  function popup(x, y, text, c) { if (!SIM) pops.push({ x, y, text, c, l: 1.2 }); }
   let simT = 0;       // seconds of game time, for the machines' timers
   function emit(x, y, n, cols, spdX, up, grav = 200, life = [0.3, 0.8], dir = 0) {
+    if (SIM) return;
     for (let i = 0; i < n; i++) parts.push({
       x, y, vx: dir ? dir * rnd(spdX * 0.3, spdX) : rnd(-spdX, spdX), vy: -rnd(0, up),
       l: rnd(life[0], life[1]), c: pick(cols), g: grav });
   }
 
   // ---------------- procedural track ----------------
+  // Every new piece is ridden first by a ghost of the streamer's wheel, with the same physics, and only
+  // kept if the ghost gets through: it never falls, stalls in a loop or hits a die. When it can't, the
+  // piece is rebuilt with what it needs (a boost pad before a gap or a loop, just strong enough) or made
+  // easier. Nothing pushes the streamer's wheel that isn't on the track: boost pads only come before
+  // gaps and loops, and springs only before dice and chip stacks.
   let pieces = [], genX = -200, lastType = '';
   function push(p) { p.x0 = genX; p.x1 = genX + p.len; genX = p.x1; pieces.push(p); return p; }
 
@@ -274,26 +280,38 @@
     p.g = x => { const t = x - p.x0; return BASE - 3 * Math.abs(Math.sin(t * Math.PI / 9)) * Math.sin(Math.PI * t / L); };
   }
 
-  function boost() {
-    const p = push({ type: 'boost', len: 44 });
-    p.g = () => BASE; p.pa = p.x0 + 12; p.pb = p.x0 + 30; p.trig = p.pa;
+  // A boost pad brings a wheel up to `power` (if it's going slower); the stronger, the longer the pad.
+  function boost(power) {
+    const pad = Math.round(10 + (power - 120) / 8);
+    const p = push({ type: 'boost', len: pad + 20 });
+    p.g = () => BASE; p.pa = p.x0 + 8; p.pb = p.pa + pad; p.trig = p.pa;
     // (a chat wheel that's parked to talk only gets the sparks, so its bubble stays put)
-    p.onTrig = w => { if (w.phase !== 'talk') { w.v = Math.max(w.v, Math.min(200, Math.max(w.v + 70, 150))); w.boostT = 1.2; }
+    p.onTrig = w => { if (w.phase !== 'talk' && w.v < power) { w.v = power; w.boostT = 1.2; }
       emit(w.x, w.y + 2, 10, [C.boostA, C.boostB, '#fff'], 50, 40, 100); };
   }
 
-  function bounce() {
-    const p = push({ type: 'bounce', len: ri(120, 150) });
-    p.g = () => BASE; p.pa = p.x0 + 12; p.pb = p.x0 + 22; p.trig = p.x0 + 17; p.spring = 0;
+  // A spring pad, always just before a die or a chip stack (p.hazard): it throws a wheel up at `power`.
+  function spring(power) {
+    const p = push({ type: 'spring', len: 14 });
+    p.g = () => BASE; p.pa = p.x0 + 2; p.pb = p.x0 + 12; p.trig = p.x0 + 7; p.spring = 0;
     p.onTrig = w => {
-      w.mode = 'air'; w.vx = w.v; w.vy = -vyCap(w, rnd(160, 200)); w.gvy = null; p.spring = 1;
+      let vy = power;
+      if (!w.main) {
+        // a chat wheel on its way in or out sometimes misses the spring and rolls into the die...
+        if (w.phase !== 'talk' && Math.random() < CRASH[w.phase]) { w.doomed = p.hazard; return; }
+        // ...otherwise it goes at its own speed, so it's thrown high enough to peak over the die
+        vy = Math.max(power, G * (p.hazard.hx - w.x) / Math.max(30, w.v));
+      }
+      w.mode = 'air'; w.vx = w.v; w.vy = -vyCap(w, vy); w.gvy = null;
+      if (!SIM) p.spring = 1;
       emit(w.x, w.y + RW, 14, ['#ffef5a', '#fff', C.pad], 45, 70, 150, [0.4, 0.9]);
     };
+    return p;
   }
 
-  function jump() {
-    if (Math.random() < 0.6) boost();
-    const Hr = ri(8, 15), rl = ri(22, 30), gap = ri(22, 60), Hl = Math.round(Hr * 0.6), ll = ri(26, 36);
+  function jump(o) {
+    if (o.power) boost(o.power);
+    const { Hr, rl, gap, ll } = o, Hl = Math.round(Hr * 0.6);
     const r = push({ type: 'ramp', len: rl });
     r.g = x => { const t = (x - r.x0) / rl; return BASE - Hr * t * t; };
     r.launch = true; r.slope = 2 * Hr / rl; r.Hr = Hr; r.gap = gap; r.drop = Hr - Hl;
@@ -301,37 +319,40 @@
     const l = push({ type: 'land', len: ll }); l.g = x => BASE - Hl * (1 - (x - l.x0) / ll);
   }
 
-  function loop() {
-    boost(); flat(ri(6, 14));
+  function loop(o) {
+    boost(o.power); flat(o.run);
     // off = 0: in and out at the same spot, so the loop is a true circle
-    const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), off = 0;
+    const R = o.R, off = 0;
     const p = push({ type: 'loop', len: R * 2 + off + 12, R, off });
     p.g = () => BASE; p.ex = p.x0 + R + 4; p.trig = p.ex;
     p.roulette = Math.random() < 0.5;   // half the loops are roulette wheels
     p.onTrig = w => {
       w.mode = 'loop'; w.loop = p; w.th = 0;
-      w.v0 = Math.max(w.v, Math.sqrt(5.4 * G * (R - RW)));
+      // the streamer's wheel goes round on the speed it brought; steered chat wheels get the speed it takes
+      w.v0 = w.main ? w.v : Math.max(w.v, Math.sqrt(5.4 * G * (R - RW)));
     };
   }
 
   // ---- casino & pinball pieces ----
-  // Dice and chip stacks sit on the track to be hopped (see hazards()).
+  // Dice and chip stacks sit on the track with a spring before them, placed so a wheel going at the
+  // ghost's speed peaks right over the top.
   const CHIP_COLS = [['#e8344e', '#a3203a'], ['#2f6bff', '#1d43a8'], ['#22b35e', '#147a3e'], ['#8a5cff', '#5a3aad'], ['#3a3450', '#1f1a2e']];
-  function hazard() {
-    const p = push({ type: 'hazard', len: 130 }); p.g = () => BASE;
-    p.hx = p.x0 + 92;   // a long run-up, so wheels are on the ground when they decide to hop it
-    if (Math.random() < 0.5) { p.kind = 'die'; p.hw = 7; p.hh = 7; p.face = ri(1, 6); }
-    else { p.kind = 'chips'; p.hw = 8; p.n = ri(3, 5); p.hh = p.n * 2; p.cols = Array.from({ length: p.n }, () => pick(CHIP_COLS)); }
+  function hazard(o) {
+    flat(16);
+    const s = spring(o.power);
+    const p = push({ type: 'hazard', len: s.trig + o.dist + 30 - s.x1 }); p.g = () => BASE;
+    Object.assign(p, o.look, { hx: s.trig + o.dist });
+    s.hazard = p;
   }
 
   // A pinball pop bumper: anything that rolls into it gets kicked up into the air.
   function bumper() {
     const p = push({ type: 'bumper', len: ri(60, 80) }); p.g = () => BASE;
-    p.bx = p.x0 + 30; p.lit = 0;
+    p.bx = p.x0 + 30; p.lit = 0; p.kick = rnd(120, 150);
     p.touch = p.bx - 4 - RW;
     p.onTouch = w => {
-      p.lit = 1;
-      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -vyCap(w, rnd(120, 150)); w.gvy = null;
+      if (!SIM) p.lit = 1;
+      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -vyCap(w, p.kick); w.gvy = null;
       emit(p.bx, BASE - 5, 12, ['#ffe600', '#fff', '#ff3b5c'], 60, 60, 120);
       popup(p.bx, BASE - 14, '+' + pick([100, 250, 500]), '#ffe600');
     };
@@ -344,16 +365,17 @@
     p.ts = TARGET_COLS.map((c, i) => ({ x: p.x0 + 24 + i * 6, c, down: 0 }));
   }
 
-  // A pinball flipper hinged on the edge of a gap, hanging down over it; when a wheel reaches the edge it
-  // swings up and swats the wheel across.
-  function flipper() {
-    const gap = ri(30, 48);
+  // A pinball flipper hinged on the edge of a gap, sticking out over it; when a wheel reaches the edge it
+  // swings up and swats the wheel across (at the speed it came with, so a wide gap gets a boost pad first).
+  function flipper(o) {
+    if (o.power) boost(o.power);
+    const gap = o.gap, kick = 210;
     const p = push({ type: 'flipper', len: 36 }); p.g = () => BASE;
     p.fx = p.x1; p.trig = p.x1 - 1; p.up = 0;
     p.onTrig = w => {
-      p.up = 1;
-      const vy = vyCap(w, rnd(190, 230)), t = 2 * vy / G;
-      w.mode = 'air'; w.vy = -vy; w.vx = Math.max(w.v, (1 + gap + 10) / t); w.gvy = null;   // always clears the gap
+      if (!SIM) p.up = 1;
+      const vy = vyCap(w, kick), t = 2 * vy / G;
+      w.mode = 'air'; w.vy = -vy; w.vx = w.main ? w.v : Math.max(w.v, (1 + gap + 10) / t); w.gvy = null;
       emit(p.fx + 6, BASE - 2, 8, ['#fff', '#ff3b5c'], 40, 50, 150);
     };
     const gp = push({ type: 'gap', len: gap }); gp.g = () => null;
@@ -366,7 +388,7 @@
     p.cx = p.x0 + 32; p.trig = p.cx; p.payAt = 0; p.won = -9;
     p.reels = [0, 1, 2].map(() => ({ s: ri(0, SYMS.length - 1), until: 0 }));
     p.onTrig = () => {
-      if (p.reels.some(r => r.until > simT)) return;   // still spinning
+      if (SIM || p.reels.some(r => r.until > simT)) return;   // a ghost doesn't play; or still spinning
       const jackpot = Math.random() < 0.18;
       p.reels.forEach((r, i) => { r.until = simT + 0.5 + i * 0.35; r.s = jackpot ? 0 : ri(0, SYMS.length - 1); });
       if (!jackpot && p.reels.every(r => r.s === 0)) p.reels[2].s = 1;   // 7-7-7 only when it's meant to be
@@ -374,17 +396,74 @@
     };
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, boost: 1, bounce: 1.5, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5 };
-  const MAKE = { hill, jump, loop, boost, bounce, bumps, hazard, bumper, flipper, slots, targets };
-  // pieces that throw wheels into the air get a long flat after them to land on
-  const AIRY = new Set(['jump', 'bounce', 'bumper', 'flipper']);
+  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5 };
+  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets };
+  // pieces that throw wheels into the air get a longer flat after them to land on
+  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard']);
+
+  // The ways to build each kind of piece, the most natural first. The first one the ghost gets through
+  // is kept, so a boost pad only turns up when the jump or loop really needs one, and only as strong as
+  // it needs to be.
+  function options(k) {
+    if (k === 'jump') {
+      const base = { Hr: ri(8, 15), rl: ri(22, 30), gap: ri(22, 60), ll: ri(26, 36) };
+      return [base, ...[130, 160, 190].map(power => ({ ...base, power })), { ...base, gap: 22, power: 200 }];
+    }
+    if (k === 'flipper') {
+      const gap = ri(30, 60);
+      return [{ gap }, { gap, power: 140 }, { gap, power: 180 }, { gap: 26 }];
+    }
+    if (k === 'loop') {
+      // going round needs about √(5.6·g·r) at the bottom; start from that and go up
+      const R = ri(14, Math.min(21, Math.floor((BASE - 4) / 2))), need = Math.ceil(Math.sqrt(5.6 * G * (R - RW)) / 10) * 10;
+      return [0, 10, 20, 40].map(d => ({ R, run: ri(6, 14), power: Math.min(200, need + d) })).concat({ R: 14, run: 6, power: 200 });
+    }
+    if (k === 'hazard') {
+      const die = Math.random() < 0.5, n = ri(3, 5);
+      const look = die ? { kind: 'die', hw: 7, hh: 7, face: ri(1, 6) }
+        : { kind: 'chips', hw: 8, hh: n * 2, n, cols: Array.from({ length: n }, () => pick(CHIP_COLS)) };
+      // spring hard enough to rise well above it, set back so the arc peaks over it at the ghost's speed
+      const power = Math.sqrt(2 * G * (look.hh + 9)), at = (vy, f = 1) => Math.round(ghost.v * vy / G * f);
+      return [1, 0.85, 1.15].map(f => ({ look, power, dist: at(power, f) })).concat({ look, power: power + 30, dist: at(power + 30) });
+    }
+    return [{}];
+  }
+
+  // ---- the ghost: rides each new piece before it's kept ----
+  let SIM = false;   // true while a ghost rides (no sparks, scores or flashing machines)
+  const ghost = Object.assign(wheel(RW + 2, CRUISE, MAIN_PAL), { main: true, ghost: true });
+  const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot'];
+  const stateOf = w => Object.fromEntries(STATE.map(k => [k, w[k]]));
+  function ride(w, toX) {   // false if it falls, stalls in a loop or hits something on the way
+    for (let n = 0; w.x < toX; n++) {
+      if (n > 240 * 20) return false;
+      step(w, 1 / 240);
+      if (w.fell || w.stalled || w.crashed) return false;
+    }
+    return true;
+  }
+  function tryBuild(k, o) {
+    const n = pieces.length, gx = genX, s = stateOf(ghost);
+    MAKE[k](o);
+    flat(AIRY.has(k) ? ri(40, 60) : ri(16, 40));
+    SIM = true;
+    // it has to work a little slower and a little faster too, since the real wheel's frames won't line up exactly
+    const twin = f => Object.assign(wheel(0, CRUISE, MAIN_PAL), s, { main: true, ghost: true, v: s.v * f, vx: s.vx * f });
+    let ok = ride(twin(0.95), genX) && ride(twin(1.05), genX) && ride(ghost, genX);
+    // and the next piece only starts once it's back on solid track
+    while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost, genX); }
+    SIM = false;
+    if (!ok) { pieces.length = n; genX = gx; Object.assign(ghost, s, { fell: false, stalled: false, crashed: false }); }
+    return ok;
+  }
+
   function gen() {
     while (genX < camX + W + 200) {
       const ks = Object.keys(WEIGHT).filter(k => k !== lastType);
       let r = Math.random() * ks.reduce((a, k) => a + WEIGHT[k], 0), k;
       for (k of ks) { r -= WEIGHT[k]; if (r <= 0) break; }
-      lastType = k; MAKE[k]();
-      flat(AIRY.has(k) ? ri(50, 80) : ri(16, 46));
+      if (options(k).some(o => tryBuild(k, o))) lastType = k;
+      else { flat(24); SIM = true; ride(ghost, genX); SIM = false; }
     }
   }
 
@@ -397,7 +476,7 @@
 
   // the source got taller or shorter: the track moves to its new bottom, and everything on it moves along
   function shiftDown(dy) {
-    for (const w of [wh, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
+    for (const w of [wh, ghost, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
     for (const q of [...parts, ...pops, ...rings, ...DECOR]) q.y += dy;
   }
 
@@ -415,12 +494,13 @@
     w.vx = w.v * Math.cos(a); w.vy = -vyCap(w, w.v * Math.sin(a));
     const t = (-w.vy + Math.sqrt(w.vy * w.vy + 2 * G * p.drop)) / G;
     const need = (p.gap + 8) / t;
-    if (w.vx < need) w.vx = need;                     // always clear the gap
+    if (!w.main && w.vx < need) w.vx = need;   // steered chat wheels always clear it (the streamer's has the speed)
     w.mode = 'air'; w.gvy = null;
     emit(w.x, w.y + RW, 6, [C.top, '#fff'], 30, 30, 150);
   }
 
   function respawn(w) {
+    if (w.ghost) { w.fell = true; return; }   // a piece the ghost falls off isn't kept
     let x = w.x; while (groundAt(x) == null) x += 2;
     w.x = x + 4; w.y = groundAt(w.x) - RW; w.mode = 'ground'; w.v = w.cruise; w.gvy = null;
     emit(w.x, w.y, 16, ['#fff', '#ccc', C.boostA], 50, 60, 80);
@@ -438,7 +518,7 @@
 
     if (w.mode === 'ground') {
       // chatters' wheels are steered (see steerRiders), so they speed up and brake harder
-      const cruise = w.cruise, grip = w === wh ? 1 : 3;
+      const cruise = w.cruise, grip = w.main ? 1 : 3;
       const sg = x => { const g = groundAt(x); return g == null ? w.y + RW : g; };
       const s = (sg(w.x + 0.75) - sg(w.x - 0.75)) / 1.5;
       const cs = 1 / Math.sqrt(1 + s * s), sn = s * cs;
@@ -447,7 +527,7 @@
         w.v += G * sn * dt * 0.7;
         w.v += (cruise - w.v) * dt * grip * (w.v > cruise ? 0.6 : 1.2);
       }
-      w.v = w === wh ? Math.min(200, Math.max(35, w.v)) : Math.min(RUSH_OUT, Math.max(0, w.v));
+      w.v = w.main ? Math.min(200, Math.max(35, w.v)) : Math.min(RUSH_OUT, Math.max(0, w.v));
       const px = w.x;
       w.x += w.v * cs * dt; w.rot += w.v * dt / RW;
 
@@ -455,7 +535,7 @@
         if (p.launch && px < p.x1 && w.x >= p.x1) { launchRamp(w, p); return; }
         if (p.trig != null && px < p.trig && w.x >= p.trig) { p.onTrig(w); if (w.mode !== 'ground') return; }
         if (p.touch != null && px < p.touch && w.x >= p.touch) { p.onTouch(w); return; }
-        if (p.ts) for (const t of p.ts) if (!t.down && px < t.x - RW + 1 && w.x >= t.x - RW + 1) knock(p, t);
+        if (p.ts && !SIM) for (const t of p.ts) if (!t.down && px < t.x - RW + 1 && w.x >= t.x - RW + 1) knock(p, t);
       }
       const ng = groundAt(w.x);
       if (ng == null) { w.mode = 'air'; w.vx = w.v * cs; w.vy = w.v * sn; return; }
@@ -474,8 +554,11 @@
 
     } else { // loop
       const p = w.loop, rr = p.R - RW;
-      const h = rr * (1 - Math.cos(w.th));
-      const v = Math.sqrt(Math.max(w.v0 * w.v0 - 2 * G * h, G * rr * 1.3));
+      const h = rr * (1 - Math.cos(w.th)), v2 = w.v0 * w.v0 - 2 * G * h;
+      // too slow to stay on at the top: the ghost marks the loop as needing a stronger pad; anything else
+      // is helped round so it never drops out
+      if (v2 < G * rr * 1.3 && w.ghost) { w.stalled = true; return; }
+      const v = Math.sqrt(Math.max(v2, G * rr * 1.3));
       w.v = v; w.th += v / rr * dt; w.rot += v * dt / RW;
       if (w.th >= Math.PI * 2) {
         w.mode = 'ground'; w.x = p.ex + p.off; w.y = BASE - RW; w.v = w.v0; w.gvy = null; return;
@@ -493,27 +576,24 @@
     else popup(t.x + 1, BASE - 10, '+50', t.c);
   }
 
-  // Dice and chip stacks. On the way up to one, a wheel decides whether to hop it, timed so it's at the top
-  // of the hop right over it. The streamer's wheel and chat wheels that are parked to talk always hop; a
-  // chat wheel on its way in or out sometimes doesn't, and blows up.
+  // Dice and chip stacks. The spring before each one throws wheels over it. A chat wheel on its way in or
+  // out sometimes misses the spring (see spring()) and blows up on the die. If anything else ever touches
+  // one (the ghost can't: a piece it hits isn't kept), it's nudged over, so the streamer's wheel and chat
+  // wheels that are talking never crash.
   // (likelier on the way out, where it's the end of its visit anyway, than on the way in, where it holds up the message)
   const CRASH = CFG.crashes ? { in: 0.25, out: 0.6 } : { in: 0, out: 0 };
   function hazards(w, x0) {
     for (const p of pieces) {
-      if (p.type !== 'hazard' || p.x1 < x0 - 20 || p.x0 > w.x + 140) continue;
-      const hop = Math.sqrt(2 * G * (p.hh + 5)), lead = p.hx - p.hw / 2 - w.v * hop / G;
-      if (w.mode === 'ground' && w.hopped !== p && w.doomed !== p && x0 < lead && w.x >= lead) {
-        if (w === wh || w.phase === 'talk' || Math.random() >= CRASH[w.phase]) { hopOver(w, p, hop); return; }
-        w.doomed = p;
-      }
+      if (p.type !== 'hazard' || p.x1 < x0 - 20 || p.x0 > w.x + 20) continue;
       if (w.hopped === p || Math.abs(w.x - p.hx) >= p.hw / 2 + RW - 1 || w.y + RW <= BASE - p.hh) continue;
+      if (w.ghost) { w.crashed = true; return; }
       if (w.doomed === p && w.phase !== 'talk') { explode(w); return; }
       w.doomed = null;
-      hopOver(w, p, hop); return;   // came in late (say, off a landing), or parked since deciding: hop now
+      hopOver(w, p); return;
     }
   }
-  function hopOver(w, p, hop) {
-    w.hopped = p; w.mode = 'air'; w.vx = Math.max(w.v, 45); w.vy = -hop; w.gvy = null;
+  function hopOver(w, p) {
+    w.hopped = p; w.mode = 'air'; w.vx = Math.max(w.v, 45); w.vy = -Math.sqrt(2 * G * (p.hh + 5)); w.gvy = null;
     emit(w.x, w.y + RW, 4, ['#e8d9b0', '#fff'], 20, 20, 150);
   }
 
@@ -555,7 +635,7 @@
           px(wx - cx, BASE + row, ph < 3 ? C.boostA : C.boostB);
         }
         if (((t * 6) | 0) & 1) for (let wx = p.pa; wx < p.pb; wx += 3) px(wx - cx, BASE - 1, 'rgba(63,248,255,0.5)');
-      } else if (p.type === 'bounce') {
+      } else if (p.type === 'spring') {
         const e = Math.round(p.spring * 6), w = p.pb - p.pa, sx = p.pa - cx;
         ctx.fillStyle = C.padDark; ctx.fillRect(sx, BASE - 1, w, 1);
         for (let i = 0; i < e; i++) px(sx + 2 + (i & 1) * (w - 5), BASE - 2 - i, C.coil);
