@@ -3,7 +3,8 @@
   Tiny Wheel Stunt Track — OBS browser source
   ------------------------------------------------
   A tiny pixel-art wheel races an endless stunt track along the bottom of the source: ramps, loops and boost
-  pads, roller-coaster lifts and dips, plus pinball bumpers, flippers and drop targets, slot machines,
+  pads, roller-coaster lifts and dips, arches, glass pipes and mini-golf style set pieces to go through (giant
+  movie monsters, a clown head, a windmill, cities' landmarks), pinball bumpers, flippers and drop targets, slot machines,
   roulette loops, and dice and chip stacks to spring over, in front of an old-time circus and a Vegas skyline. When people chat, their own wheels roll by in their chat color, with little pixel speech
   bubbles (and sometimes crash into a die and blow up).
 
@@ -64,12 +65,13 @@
   *{font-variant-ligatures:none}
 
   /* ---------- speech bubbles, moved over their wheel every frame ---------- */
-  @keyframes pop{from{scale:.3}to{scale:1}}
+  /* bubbles grow out of the spot where their tail leaves them (--ox, set as they move) */
+  @keyframes grow{from{scale:0}to{scale:1}}
   .bub{position:fixed;left:0;top:0;width:max-content;max-width:calc(var(--ts) * 17);box-sizing:border-box;
     padding:calc(var(--p) + 3px) calc(var(--p) + 5px);background:#fffaf0;color:var(--ink);
     font:500 var(--ts)/1.3 var(--txt);overflow-wrap:anywhere;box-shadow:var(--vx);
-    pointer-events:none;will-change:transform;opacity:0;transition:opacity .3s;transform-origin:10% 100%}
-  .bub.show{opacity:1;animation:pop .35s cubic-bezier(.3,1.6,.5,1)}
+    pointer-events:none;will-change:transform;opacity:0;transition:opacity .25s;transform-origin:var(--ox,16px) 100%}
+  .bub.show{opacity:1;animation:grow .3s cubic-bezier(.25,1.25,.5,1)}
   .bub b{display:block;width:max-content;max-width:100%;margin:0 0 5px;padding:4px 5px 3px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap;font:400 calc(var(--ts) * .58)/1.2 var(--pix);
     background:var(--c);color:var(--ink);box-shadow:inset 0 -2px 0 0 rgba(0,0,0,.25)}
@@ -78,7 +80,7 @@
   /* the tail: shrinking squares spaced out along the line from the bubble to its wheel */
   .bub-dot{position:fixed;left:0;top:0;background:#fffaf0;box-shadow:var(--vx);pointer-events:none;
     will-change:transform;opacity:0;transition:opacity .3s}
-  .bub-dot.show{opacity:1}
+  .bub-dot.show{opacity:1;animation:grow .3s ease-out}
 
   /* ---------- settings window (only visible while you interact with the source) ---------- */
   /* Track colors: an orange girder header with the ramps' red-and-white stripes, and boost-pad blue. */
@@ -441,8 +443,32 @@
     p.onTrig = () => { if (!SIM && p.start < 0) p.start = simT; };
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5 };
-  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets, coaster, dominoes };
+  // Things to ride through: an arch over the track (a striped circus one, or a neon casino one with a sign),
+  // a tunnel the wheels vanish into for a moment, and a glass pipe you can see them roll along inside.
+  function arch() {
+    const p = push({ type: 'arch', len: 44 }); p.g = () => BASE;
+    p.ax = p.x0 + 22; p.neon = Math.random() < 0.5;
+    p.cols = pick(TENT_COLS); p.sign = p.neon ? pick(['WIN', 'LUCKY', 'VEGAS']) : 'CIRCUS';
+  }
+  // Most tunnels are set pieces (see SETS): a mini-golf obstacle the wheels go in one end of and come out
+  // the other. They stand 56 px tall, so a strip shorter than the default gets plain stone tunnels.
+  function tunnel() {
+    if (ROWS >= 72) {
+      const set = pick(Object.keys(SETS)), s = SETS[set], art = s.img ??= s.make();
+      const p = push({ type: 'tunnel', len: art.width + 6 }); p.g = () => BASE;
+      Object.assign(p, { set, art, ax: p.x0 + 3, ph: rnd(0, 5) });
+      return;
+    }
+    const L = ri(56, 90), p = push({ type: 'tunnel', len: L + 16 }); p.g = () => BASE;
+    p.ta = p.x0 + 8; p.tb = p.ta + L;
+  }
+  function pipe() {
+    const p = push({ type: 'pipe', len: ri(60, 110) }); p.g = () => BASE;
+  }
+
+  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, slots: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
+    arch: 1.5, tunnel: 1.2, pipe: 1.5 };
+  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, slots, targets, coaster, dominoes, arch, tunnel, pipe };
   // pieces that throw wheels into the air get a longer flat after them to land on
   const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster']);
   // loops fit within the strip (`rows`), whatever the size of the source
@@ -798,6 +824,492 @@
     }
   }
 
+  // An arch over the track: a half-ring with a straight leg down from each end to the track, made from one
+  // shape so the legs always meet the ring. It's drawn in front of the wheels, so they pass behind its legs
+  // and through the middle. Bulbs chase round the outside and a sign sits on top. Circus arches are striped
+  // in their colors; casino arches are neon tubes that flicker.
+  function drawArch(p, cx, t) {
+    const ax = Math.round(p.ax - cx), R = 15, cy = BASE - 15, [A, B] = p.cols, th = p.neon ? 2 : 3;
+    const neonC = ['#ff3bd0', '#3ff8ff'][Math.floor(t * 2 + p.ax) & 1];
+    for (let y = cy - R; y < BASE; y++) for (let dx = -R; dx <= R; dx++) {
+      const leg = y > cy && Math.abs(dx) > R - th;
+      const ring = y <= cy && Math.hypot(dx, y - cy) <= R + 0.5 && Math.hypot(dx, y - cy) > R - th + 0.5;
+      if (!leg && !ring) continue;
+      // stripes run round the ring and down the legs
+      const along = ring ? Math.floor((Math.atan2(y - cy, dx) + Math.PI) / Math.PI * 12) : Math.floor((y - cy) / 2) + 99;
+      px(ax + dx, y, p.neon ? (Math.abs(dx) > R - 1 || Math.hypot(dx, y - cy) > R - 0.5 ? '#2a2236' : neonC) : along & 1 ? A : B);
+    }
+    for (let i = 0; i <= 16; i++) {
+      const a = Math.PI + i / 16 * Math.PI;
+      px(Math.round(ax + Math.cos(a) * (R + 1.5)), Math.round(cy + Math.sin(a) * (R + 1.5)), (i + Math.floor(t * 6)) % 3 ? '#fff3a8' : '#ffd84a');
+    }
+    const w = p.sign.length * 4 + 3, sy = cy - R - 9;
+    ctx.fillStyle = p.neon ? '#2a2236' : A; ctx.fillRect(ax - (w >> 1), sy, w, 8);
+    ctx.fillStyle = '#ffd84a'; ctx.fillRect(ax - (w >> 1), sy + 7, w, 1);
+    drawText(p.sign, ax, sy + 1, p.neon ? neonC : '#fffaf0');
+  }
+
+  // ---------------- set pieces: mini-golf obstacles the track runs through ----------------
+  // Like the big painted figures on a mini-golf course: a painted block over the track with a round hole at
+  // each end (the wheels go in one and come out of the other), and on top a giant movie monster, a clown's
+  // head, a windmill, or a city's landmarks piled up together. They're drawn with a little pixel-art kit:
+  // shapes shaded from a light up and to the left, dithered between shades, and outlined in dark ink.
+  const INK = [20, 12, 28];
+  const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const tintRgb = (c, f) => c.map(v => Math.round(v + ((f > 0 ? 255 : 0) - v) * Math.abs(f)));
+  const ramp = hex => { const c = hexRgb(hex); return [tintRgb(c, 0.5), tintRgb(c, 0.22), c, tintRgb(c, -0.25), tintRgb(c, -0.5)]; };   // lightest first
+  const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  class Art {
+    constructor(w, h) { this.w = w; this.h = h; this.px = new Array(w * h).fill(null); }
+    put(x, y, c) { x = Math.round(x); y = Math.round(y); if (x >= 0 && y >= 0 && x < this.w && y < this.h) this.px[y * this.w + x] = c; }
+    // a shade from a ramp for a lightness v (1 = full light), dithered so neighbouring shades mix
+    tone(x, y, r, v) {
+      const i = Math.round((1 - clamp(v, 0, 1)) * (r.length - 1) + (BAYER4[(Math.round(y) & 3) * 4 + (Math.round(x) & 3)] / 16 - 0.5) * 0.9);
+      this.put(x, y, r[clamp(i, 0, r.length - 1)]);
+    }
+    rect(x, y, w, h, c) { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) this.put(x + i, y + j, c); }
+    // a lit block: brighter toward the top left, a highlight along its top and left edges, shadow down the right
+    box(x, y, w, h, r, v0 = 0.62) {
+      for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+        let v = v0 - 0.25 * i / Math.max(1, w - 1) - 0.12 * j / Math.max(1, h - 1);
+        if (j === 0 || i === 0) v += 0.3; else if (i === w - 1) v -= 0.3;
+        this.tone(x + i, y + j, r, v);
+      }
+    }
+    // a lit ball (any ellipse), shaded by which way its surface faces; gloss adds a painted-on shine
+    ball(cx, cy, rx, ry, r, gloss = false) {
+      for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++) {
+        const nx = (x - cx) / (rx + 0.35), ny = (y - cy) / (ry + 0.35), d = nx * nx + ny * ny;
+        if (d > 1) continue;
+        const dot = -0.45 * nx - 0.55 * ny + 0.7 * Math.sqrt(1 - d);
+        if (gloss && dot > 0.94) this.put(x, y, [255, 255, 255]); else this.tone(x, y, r, dot * 0.8 + 0.18);
+      }
+    }
+    // a capsule between two points, from one thickness to another: arms, legs, necks, tails
+    limb(x0, y0, x1, y1, r0, r1, r) {
+      const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0)) + 1;
+      for (let i = 0; i <= n; i++) { const t = i / n, rr = r0 + (r1 - r0) * t; this.ball(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, rr, rr, r); }
+    }
+    // a filled polygon: one color, or a ramp lit from the left across it
+    poly(pts, c, r) {
+      const ys = pts.map(p => p[1]), xs = pts.map(p => p[0]), xa = Math.min(...xs), xb = Math.max(...xs);
+      for (let y = Math.floor(Math.min(...ys)); y <= Math.ceil(Math.max(...ys)); y++) {
+        const hits = [];
+        for (let i = 0; i < pts.length; i++) {
+          const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % pts.length], yc = y + 0.5;
+          if ((ay <= yc && by > yc) || (by <= yc && ay > yc)) hits.push(ax + (yc - ay) / (by - ay) * (bx - ax));
+        }
+        hits.sort((a, b) => a - b);
+        for (let k = 0; k + 1 < hits.length; k += 2) for (let x = Math.ceil(hits[k] - 0.5); x <= Math.floor(hits[k + 1] - 0.5); x++)
+          if (r) this.tone(x, y, r, 0.78 - 0.5 * (x - xa) / Math.max(1, xb - xa)); else this.put(x, y, c);
+      }
+    }
+    line(x0, y0, x1, y1, c) {
+      const n = Math.max(1, Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))));
+      for (let i = 0; i <= n; i++) this.put(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, c);
+    }
+    // dark ink all round the outside
+    outline() {
+      const out = this.px.slice(), on = (x, y) => x >= 0 && y >= 0 && x < this.w && y < this.h && this.px[y * this.w + x] && this.px[y * this.w + x] !== INK;
+      for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++)
+        if (!this.px[y * this.w + x] && (on(x + 1, y) || on(x - 1, y) || on(x, y + 1) || on(x, y - 1))) out[y * this.w + x] = INK;
+      this.px = out;
+    }
+    canvas() {
+      const c = document.createElement('canvas'); c.width = this.w; c.height = this.h;
+      const g = c.getContext('2d'), im = g.createImageData(this.w, this.h);
+      this.px.forEach((p, i) => { if (p) { im.data[i * 4] = p[0]; im.data[i * 4 + 1] = p[1]; im.data[i * 4 + 2] = p[2]; im.data[i * 4 + 3] = 255; } });
+      g.putImageData(im, 0, 0);
+      return c;
+    }
+  }
+  const WHITE = [250, 246, 238], DARK = [26, 14, 30], GOLD = ramp('#ffc83a');
+
+  // The painted block every set piece stands on: 14 rows over the track (it sits on the track's bottom
+  // edge), striped and checked like mini-golf trim, with a round-topped hole at each end.
+  const PLINTH = 14;
+  function plinth(a, col, trim) {
+    const y = a.h - PLINTH, t = hexRgb(trim);
+    a.box(1, y, a.w - 2, PLINTH, ramp(col), 0.72);
+    for (let x = 2; x < a.w - 2; x++) a.put(x, y + 2, t);
+    for (let x = 2; x < a.w - 3; x += 4) for (const dy of [11, 12]) { a.put(x, y + dy, t); a.put(x + 1, y + dy, t); }
+    for (const hx of [3, a.w - 13]) for (let j = 0; j < 11; j++) for (let i = 0; i < 10; i++) {
+      const dx = i - 4.5, half = j < 5 ? Math.sqrt(Math.max(0, 25 - (5 - j) ** 2)) : 5;
+      if (Math.abs(dx) > half) continue;
+      a.put(hx + i, a.h - 11 + j, Math.abs(dx) > half - 1.2 || j === 0 ? [58, 36, 66] : DARK);
+    }
+  }
+
+  // ---- the monsters ----
+  function bakeApe() {
+    const a = new Art(46, 56), fur = ramp('#6a4430'), skin = ramp('#c8946a'), G = a.h - PLINTH - 1;
+    plinth(a, '#2f9d5a', '#ffd84a');
+    a.limb(30, G - 9, 32, G - 1, 5, 4.5, fur); a.ball(34, G - 1, 5, 2, fur);            // legs and feet
+    a.limb(17, G - 9, 14, G - 1, 5.5, 4.5, fur); a.ball(12, G - 1, 5, 2, fur);
+    a.limb(34, 17, 39, 27, 4.5, 4, fur); a.limb(39, 27, 39, 34, 4, 3.5, fur); a.ball(39, 35, 4, 3, skin);   // arm down
+    a.ball(23, 23, 13, 12, fur, true);                                                  // body
+    a.ball(19, 24, 7, 8, skin, true);                                                   // chest
+    a.line(15, 22, 22, 22, skin[3]); a.line(19, 26, 19, 30, skin[3]);
+    a.limb(12, 17, 7, 10, 5, 4, fur); a.limb(7, 10, 6, 6, 4, 3.5, fur); a.ball(6, 5, 4.5, 4, skin, true);   // arm up, fist
+    for (const k of [4, 6, 8]) a.put(k, 3, skin[3]);
+    a.ball(16, 11, 8.5, 7.5, fur, true);                                                // head
+    a.ball(13, 14, 6.5, 4.5, skin, true);                                               // muzzle
+    a.ball(23, 11, 2, 2.5, skin);                                                       // ear
+    a.line(9, 9, 20, 8, fur[4]); a.line(9, 10, 12, 11, fur[4]); a.line(15, 11, 19, 10, fur[4]);   // a glowering brow
+    for (const [x, y] of [[11, 11], [12, 11], [17, 11], [18, 11]]) a.put(x, y, [255, 214, 60]);
+    a.put(12, 11, DARK); a.put(17, 11, DARK);
+    a.put(11, 14, DARK); a.put(14, 14, DARK);                                           // nostrils
+    a.rect(9, 16, 8, 3, DARK); for (const x of [9, 11, 14, 16]) a.put(x, 16, WHITE); a.put(10, 18, WHITE); a.put(15, 18, WHITE);   // roaring mouth
+    a.rect(11, 17, 4, 1, [200, 60, 90]);
+    a.outline();
+    return a.canvas();
+  }
+  function bakeLizard() {
+    const a = new Art(52, 56), sk = ramp('#4f8a5a'), belly = ramp('#c8c884'), plate = ramp('#bfe6c8'), G = a.h - PLINTH - 1;
+    plinth(a, '#3a6ac8', '#fff3a8');
+    a.limb(30, G - 6, 41, G - 3, 6, 5, sk); a.limb(41, G - 3, 48, G - 9, 5, 3, sk); a.limb(48, G - 9, 49, G - 15, 3, 1.5, sk);   // tail
+    a.ball(29, G - 10, 8, 7, sk, true); a.limb(28, G - 7, 27, G - 1, 4.5, 4, sk); a.ball(25, G - 1, 5.5, 2, sk);              // back leg
+    a.limb(20, G - 9, 18, G - 1, 4, 3.5, sk); a.ball(16, G - 1, 4.5, 2, sk);                                                  // front leg
+    // plates down its back, drawn before the body so the body overlaps their roots
+    for (let i = 0; i < 7; i++) {
+      const x = 21 + i * 2.7, y = 4 + i * 4.4, s = 4.2 - i * 0.35;
+      a.poly([[x - s * 0.6, y + s], [x + s * 0.4, y - s * 1.1], [x + s * 1.2, y + s * 0.6]], null, plate);
+    }
+    a.ball(25, 23, 10, 13, sk, true);                                                    // body
+    a.ball(20, 25, 5, 10, belly);
+    for (let y = 17; y < 35; y += 2) for (let x = 15; x < 26; x++) if (a.px[y * a.w + x] && a.px[y * a.w + x] !== sk[0]) { const c = a.px[y * a.w + x]; if (belly.includes(c)) a.put(x, y, belly[3]); }
+    a.limb(22, 13, 16, 9, 6, 5, sk);                                                     // neck
+    a.ball(14, 8, 7, 5, sk, true);                                                       // head
+    a.poly([[3, 6], [13, 3], [15, 10], [4, 10]], null, sk);                              // snout
+    a.poly([[5, 13], [14, 12], [16, 16], [7, 16]], null, sk);                            // lower jaw
+    a.rect(5, 10, 10, 3, DARK); a.rect(7, 12, 7, 1, [200, 60, 90]);                     // roaring mouth
+    for (let x = 5; x < 14; x += 2) { a.put(x, 10, WHITE); a.put(x + 1, 13, WHITE); }
+    a.put(13, 5, [255, 214, 60]); a.put(12, 5, DARK); a.put(4, 7, DARK);
+    a.limb(18, 17, 12, 21, 2.5, 2, sk); a.put(11, 22, WHITE); a.put(12, 22, WHITE);      // little arms with claws
+    a.outline();
+    return a.canvas();
+  }
+  function bakeWolf() {
+    const a = new Art(46, 56), fur = ramp('#7a7a98'), lite = ramp('#d0d0e4'), G = a.h - PLINTH - 1;
+    plinth(a, '#8a3ab8', '#ffd84a');
+    a.ball(37, 7, 6, 6, ramp('#fff3c0'));                                                // the moon it's howling at
+    a.limb(31, G - 9, 41, G - 5, 3, 4.5, fur); a.ball(42, G - 5, 3.5, 3, lite);            // bushy tail
+    a.limb(19, G - 10, 16, G - 1, 4.5, 3.5, fur); a.limb(28, G - 10, 30, G - 1, 4.5, 3.5, fur);   // legs
+    a.ball(15, G, 4, 1.5, lite); a.ball(31, G, 4, 1.5, lite);
+    a.ball(24, 24, 10, 11, fur, true);                                                   // body
+    a.ball(19, 24, 6, 8, lite);                                                          // shaggy chest
+    for (let y = 18; y < 32; y += 3) a.put(17 + (y % 2), y, fur[3]);
+    a.limb(30, 17, 36, 24, 3.5, 3, fur); for (const x of [35, 37]) a.put(x, 27, WHITE);  // arms, claws out
+    a.limb(15, 18, 9, 12, 3.5, 3, fur); for (const x of [6, 8]) a.put(x, 10, WHITE);
+    a.limb(19, 15, 16, 10, 5, 4.5, fur);                                                  // neck
+    a.ball(16, 9, 6, 5.5, fur, true);                                                    // head, tipped back
+    a.limb(12, 6, 6, 1.5, 3.2, 2.2, fur);                                                 // snout, pointing up
+    a.put(5, 1, DARK); a.line(7, 4, 11, 8, DARK); a.put(9, 6, WHITE);                    // nose and open jaws
+    a.poly([[17, 5], [20, -1], [21, 6]], null, fur); a.poly([[14, 4], [15, 0], [17, 5]], null, fur);   // ears
+    a.put(14, 8, [255, 214, 60]); a.put(15, 8, [255, 214, 60]);
+    a.outline();
+    return a.canvas();
+  }
+  function bakeRobot() {
+    const a = new Art(42, 56), chrome = ramp('#9aa2c0'), joint = ramp('#4a4a66'), G = a.h - PLINTH - 1;
+    plinth(a, '#c4203e', '#fffaf0');
+    a.box(8, G - 3, 11, 4, chrome); a.box(22, G - 3, 11, 4, chrome);                     // feet
+    a.box(10, G - 12, 7, 9, chrome); a.box(24, G - 12, 7, 9, chrome);                    // legs
+    a.box(9, G - 16, 24, 5, joint);                                                       // hips
+    a.box(6, 11, 30, 16, chrome);                                                         // torso
+    a.rect(10, 14, 13, 9, DARK);                                                          // chest panel (its lights blink)
+    a.ball(29, 17, 3, 3, ramp('#ff3b5c'), true);
+    for (let x = 8; x < 35; x += 4) { a.put(x, 12, WHITE); a.put(x, 25, chrome[4]); }
+    a.ball(6, 13, 4.5, 4.5, chrome, true); a.ball(36, 13, 4.5, 4.5, chrome, true);        // shoulders
+    a.box(2, 16, 6, 11, chrome); a.box(1, 27, 3, 4, joint); a.box(5, 27, 3, 4, joint);    // arm and pincer
+    a.box(34, 16, 6, 11, chrome); a.box(34, 27, 6, 3, joint);
+    a.rect(17, 9, 8, 2, joint[2]);                                                        // neck
+    a.box(12, 2, 18, 8, chrome);                                                          // head
+    a.rect(13, 4, 16, 3, DARK);                                                           // visor (it scans)
+    for (let x = 15; x < 28; x += 2) a.put(x, 8, DARK);
+    a.rect(20, 0, 1, 2, chrome[3]);
+    a.outline();
+    return a.canvas();
+  }
+  function bakeClown() {
+    const a = new Art(48, 56), face = ramp('#f6eadc'), hair = ramp('#ff5a2a'), red = ramp('#e8283e'), G = a.h - PLINTH - 1;
+    plinth(a, '#ffb000', '#3a6ac8');
+    for (const [x, y, r] of [[6, 22, 7], [41, 22, 7], [9, 13, 5], [38, 13, 5], [5, 30, 5], [42, 30, 5]]) a.ball(x, y, r, r, hair, true);   // hair tufts
+    a.ball(24, 23, 16, 16, face, true);                                                   // the face
+    a.poly([[17, 10], [24, 0], [31, 10]], null, ramp('#3a6ac8'));                          // little hat
+    for (let y = 2; y < 10; y += 3) a.line(24 - (y - 0) * 0.6, y, 24 + (y - 0) * 0.6, y, hexRgb('#ffd84a'));
+    a.ball(24, 1, 2, 1.5, GOLD);
+    for (const ex of [17, 31]) {                                                          // painted eyes
+      a.poly([[ex, 15], [ex + 4, 20], [ex, 25], [ex - 4, 20]], hexRgb('#3a6ac8'));
+      a.ball(ex, 20, 2.5, 3, ramp('#ffffff')); a.rect(ex, 20, 1, 2, DARK);
+    }
+    a.ball(24, 32, 10, 5, red, true); a.rect(17, 31, 15, 2, WHITE); a.line(17, 33, 31, 33, red[4]);   // big grin
+    a.ball(24, 26, 4, 3.5, red, true);                                                    // nose
+    for (let x = 6; x < 44; x += 4) a.ball(x, G - 1, 3, 2.5, ramp(['#ff3bd0', '#3ff8ff', '#ffe600'][(x >> 2) % 3]));   // ruffle collar
+    a.outline();
+    return a.canvas();
+  }
+  function bakeWindmill() {
+    const a = new Art(44, 56), wall = ramp('#e8443a'), roof = ramp('#6a4a3a'), G = a.h - PLINTH - 1;
+    plinth(a, '#2f9d5a', '#fffaf0');
+    a.poly([[11, G + 1], [15, 16], [29, 16], [33, G + 1]], null, wall);                    // the tower
+    for (let y = 20; y < G; y += 4) for (let x = 12; x < 33; x++) if (a.px[y * a.w + x]) a.put(x, y, WHITE);   // painted planks
+    a.poly([[12, 17], [22, 6], [32, 17]], null, roof);                                     // cap
+    a.box(19, G - 9, 6, 9, ramp('#4a2a20')); a.ball(22, G - 9, 3, 2, ramp('#4a2a20'));     // door
+    a.box(20, 22, 4, 5, ramp('#bfe8ff')); a.put(22, 22, DARK); a.line(20, 24, 23, 24, DARK);   // window
+    for (const x of [13, 31]) { a.ball(x, G - 2, 2.5, 2, ramp('#ff3bd0'), true); a.put(x, G - 4, hexRgb('#2fd06a')); }   // tulips
+    a.outline();
+    return a.canvas();
+  }
+
+  // ---- the cities: each one's landmarks crowded together, big ----
+  function bakeParis() {
+    const a = new Art(66, 56), G = a.h - PLINTH - 1, iron = ramp('#8a6a4a'), stone = ramp('#e8d8b8'), white = ramp('#f4efe4');
+    plinth(a, '#3a6ac8', '#fffaf0');
+    // Sacré-Cœur behind
+    a.ball(52, 15, 6, 7, white, true); a.ball(44, 20, 3, 3.5, white); a.ball(60, 20, 3, 3.5, white);
+    a.box(51, 5, 3, 5, white); a.rect(52, 2, 1, 3, white[2]);
+    a.box(41, 19, 22, 10, white);
+    // the Eiffel Tower, oversized
+    for (let y = 1; y <= G; y++) {
+      const hw = 1.2 + Math.pow(y / G, 2.1) * 15.5;
+      for (let dx = -Math.floor(hw); dx <= hw; dx++) {
+        const ad = Math.abs(dx), edge = ad > hw - 2.4;
+        if (y > G - 11 && ad < (y - (G - 11)) * 1.15 + 2.5 && ad < hw - 3.2) continue;      // the great arch
+        // solid girders up the edges, platforms, and criss-cross lattice in between
+        const lattice = ((dx + y + 64) & 3) === 0 || ((dx - y + 64) & 3) === 0;
+        if (edge || y === 14 || y === 15 || y === 28 || y === 29 || y < 7 || lattice)
+          a.tone(16 + dx, y, iron, edge ? (dx < 0 ? 0.9 : 0.3) : lattice ? 0.6 - dx * 0.025 : 0.7);
+      }
+    }
+    a.rect(8, 14, 17, 1, iron[0]); a.rect(4, 28, 25, 1, iron[0]); a.rect(16, 0, 1, 2, iron[3]);
+    // the Arc de Triomphe in front
+    a.box(32, 23, 26, G - 22, stone);
+    a.rect(32, 23, 26, 3, stone[0]); a.line(32, 26, 57, 26, stone[3]);
+    for (let j = 0; j < 12; j++) for (let i = -5; i <= 5; i++) if (j > 5 || Math.hypot(i, 5 - j) < 5.4) a.put(45 + i, G - 11 + j, DARK);
+    for (const x of [35, 53]) { a.rect(x, 29, 3, 6, stone[3]); a.rect(x, 30, 1, 4, stone[1]); }
+    a.line(44, 14, 44, 22, DARK);                                                          // a little French flag
+    a.rect(45, 14, 2, 4, hexRgb('#3a6ac8')); a.rect(47, 14, 2, 4, WHITE); a.rect(49, 14, 2, 4, hexRgb('#e8283e'));
+    for (const [x, y] of [[4, 40], [60, 40]]) { a.ball(x, y - 2, 3, 2, ramp('#2fb04a')); a.rect(x, y, 1, 2, DARK); }   // little trees
+    a.outline();
+    return a.canvas();
+  }
+  function bakeLondon() {
+    const a = new Art(68, 56), G = a.h - PLINTH - 1, sand = ramp('#d8b878'), wheel = hexRgb('#e8e8f4'), red = ramp('#e8283e');
+    plinth(a, '#2f9d5a', '#fffaf0');
+    // the London Eye behind
+    const ex = 36, ey = 19, R = 16;
+    a.line(ex, ey, ex - 7, G, hexRgb('#c9c9d8')); a.line(ex + 1, ey, ex + 8, G, hexRgb('#a9a9b8'));
+    for (let i = 0; i < 12; i++) { const t = i / 12 * Math.PI * 2; a.line(ex, ey, ex + Math.cos(t) * R, ey + Math.sin(t) * R, hexRgb('#a8a8c0')); }
+    for (let i = 0; i < 160; i++) { const t = i / 160 * Math.PI * 2; a.put(ex + Math.cos(t) * R, ey + Math.sin(t) * R, wheel); a.put(ex + Math.cos(t) * (R - 2), ey + Math.sin(t) * (R - 2), hexRgb('#b8b8cc')); }
+    for (let i = 0; i < 16; i++) { const t = i / 16 * Math.PI * 2; a.rect(Math.round(ex + Math.cos(t) * (R + 1)) - 1, Math.round(ey + Math.sin(t) * (R + 1)) - 1, 2, 2, hexRgb('#bfe8ff')); }
+    a.ball(ex, ey, 2, 2, ramp('#d8d8e8'));
+    // Tower Bridge on the right
+    for (const tx of [48, 60]) {
+      a.box(tx, 13, 7, G - 12, ramp('#c8c0b0'));
+      a.poly([[tx - 1, 13], [tx + 3.5, 5], [tx + 8, 13]], null, ramp('#5a6a8a'));
+      a.rect(tx + 3, 3, 1, 3, GOLD[1]);
+      for (const y of [17, 23, 29]) { a.rect(tx + 2, y, 3, 3, DARK); }
+    }
+    a.box(55, 14, 5, 3, ramp('#4a7ac8')); a.box(44, 33, 24, 3, ramp('#4a7ac8'));
+    // Big Ben on the left, oversized
+    a.box(3, 15, 11, G - 14, sand);
+    for (let y = 20; y < G; y += 3) { a.put(6, y, sand[4]); a.put(10, y, sand[4]); }
+    a.box(2, 7, 13, 9, sand); a.ball(8, 11, 4, 4, ramp('#fffaf0')); for (let i = 0; i < 12; i++) a.put(8 + Math.cos(i / 6 * Math.PI) * 4, 11 + Math.sin(i / 6 * Math.PI) * 4, GOLD[1]);
+    a.box(4, 4, 9, 3, sand); a.poly([[3, 4], [8.5, -1], [14, 4]], null, ramp('#4a4a62')); a.put(8, 0, GOLD[0]);
+    // a red double-decker bus and a phone box in front
+    a.box(19, G - 10, 24, 11, red); a.rect(21, G - 8, 20, 2, hexRgb('#cfe8ff')); a.rect(21, G - 4, 20, 2, hexRgb('#cfe8ff'));
+    for (let x = 24; x < 41; x += 4) { a.put(x, G - 8, red[3]); a.put(x, G - 7, red[3]); a.put(x, G - 4, red[3]); a.put(x, G - 3, red[3]); }
+    a.rect(19, G - 6, 24, 1, hexRgb('#ffd84a')); a.ball(23, G + 1, 2, 2, ramp('#2a2236')); a.ball(39, G + 1, 2, 2, ramp('#2a2236'));
+    a.box(15, G - 8, 4, 9, red); a.rect(16, G - 6, 2, 3, hexRgb('#ffe9a0'));
+    a.outline();
+    return a.canvas();
+  }
+  function bakeNewYork() {
+    const a = new Art(64, 56), G = a.h - PLINTH - 1, deco = ramp('#cfc4ae'), steel = ramp('#aab4c8'), green = ramp('#62b89a');
+    plinth(a, '#e8283e', '#fffaf0');
+    // the Empire State Building
+    a.box(27, 24, 14, G - 23, deco); a.box(29, 15, 10, 10, deco); a.box(31, 7, 6, 9, deco); a.box(32, 3, 4, 5, deco); a.rect(34, 0, 1, 3, deco[3]);
+    for (let y = 9; y < G; y += 2) for (let x = 28; x < 41; x += 2) if (a.px[y * a.w + x]) a.put(x, y, (x * 7 + y * 3) % 5 === 0 ? hexRgb('#ffe9a0') : deco[4]);
+    // the Chrysler Building
+    a.box(45, 15, 9, G - 14, steel);
+    for (let k = 0; k < 4; k++) for (let i = 0; i < 40; i++) { const t = Math.PI + i / 39 * Math.PI; a.put(49.5 + Math.cos(t) * (5 - k), 15 + Math.sin(t) * (6 - k) - k * 1.5, k & 1 ? steel[0] : steel[2]); }
+    for (let k = 0; k < 4; k++) a.put(49 + (k & 1), 6 - k, DARK);
+    a.rect(49, 0, 1, 6, steel[1]);
+    for (let y = 18; y < G; y += 2) for (let x = 46; x < 53; x += 2) a.put(x, y, (x + y) % 6 === 0 ? hexRgb('#ffe9a0') : steel[4]);
+    // the Statue of Liberty, big, out front on its pedestal
+    a.box(3, 31, 17, G - 30, ramp('#a8a2b8')); a.box(5, 28, 13, 3, ramp('#b8b2c8'));
+    for (let y = 34; y < G; y += 3) a.line(5, y, 17, y, hexRgb('#8a849a'));
+    a.poly([[6, 28], [16, 28], [14, 13], [9, 13]], null, green);
+    for (const x of [9, 11, 13]) a.line(x, 15, x + (x - 11) * 0.3, 27, green[4]);
+    a.ball(11, 10, 2.6, 2.6, green, true);
+    for (let i = 0; i < 7; i++) { const t = Math.PI + 0.2 + i / 6 * (Math.PI - 0.4); a.put(11 + Math.cos(t) * 4.5, 10 + Math.sin(t) * 4.5, green[1]); }
+    a.limb(13, 14, 16, 5, 1.6, 1.4, green); a.box(15, 2, 3, 3, GOLD);
+    a.box(5, 16, 3, 6, ramp('#4a9a80'));
+    // a yellow cab
+    a.box(44, G - 4, 17, 5, ramp('#ffd23f')); a.box(48, G - 7, 9, 3, ramp('#ffd23f')); a.rect(49, G - 6, 7, 1, hexRgb('#cfe8ff'));
+    for (let x = 45; x < 60; x += 2) a.put(x, G - 2, DARK);
+    a.ball(47, G + 1, 2, 2, ramp('#2a2236')); a.ball(58, G + 1, 2, 2, ramp('#2a2236'));
+    a.outline();
+    return a.canvas();
+  }
+  function bakeItaly() {
+    const a = new Art(66, 56), G = a.h - PLINTH - 1, marble = ramp('#f2ecdc'), trav = ramp('#e0c48e');
+    plinth(a, '#2f9d5a', '#e8283e');
+    // St Peter's dome behind
+    a.ball(48, 16, 10, 10, ramp('#c8d0d8'), true); a.box(37, 16, 22, 8, marble); a.box(46, 3, 4, 4, marble); a.rect(48, 0, 1, 3, marble[3]);
+    for (let x = 40; x < 57; x += 3) a.rect(x, 18, 1, 4, marble[4]);
+    // the Colosseum: three rings of arches, the top broken away on the right
+    for (let x = 20; x < 64; x++) {
+      const t = (x - 20) / 43, top = 22 + Math.round(Math.pow(t, 3) * 9);
+      for (let y = top; y <= G; y++) a.tone(x, y, trav, 0.8 - t * 0.55 - (y - top) * 0.004);
+    }
+    for (const [y0, hgt] of [[25, 4], [31, 4], [37, 4]]) for (let x = 22; x < 63; x += 5) {
+      if (a.px[(y0 - 1) * a.w + x] == null) continue;
+      a.rect(x, y0, 3, hgt, DARK); a.put(x + 1, y0 - 1, DARK);
+    }
+    for (const y of [24, 30, 36]) for (let x = 20; x < 64; x++) if (a.px[y * a.w + x]) a.put(x, y, trav[0]);
+    // the Leaning Tower of Pisa
+    for (let tier = 0; tier < 8; tier++) {
+      const y = G - (tier + 1) * 5 + 1, x = 3 + Math.round(tier * 1.15), w = tier === 7 ? 8 : 11;
+      a.box(x + (tier === 7 ? 1 : 0), y, w, 5, marble);
+      for (let i = x + 2; i < x + w - 1; i += 2) { a.put(i, y + 2, marble[4]); a.put(i, y + 3, marble[4]); }
+    }
+    a.outline();
+    return a.canvas();
+  }
+  function bakeCairo() {
+    const a = new Art(66, 56), G = a.h - PLINTH - 1, sand = ramp('#e0b468'), stone = ramp('#d8a860');
+    plinth(a, '#c48a2a', '#3a6ac8');
+    // two pyramids, lit on their left faces
+    for (const [cx, top, hw] of [[24, 4, 22], [52, 16, 14]]) for (let y = top; y <= G; y++) {
+      const w = (y - top) / (G - top) * hw;
+      for (let dx = -Math.floor(w); dx <= w; dx++) a.tone(cx + dx, y, sand, dx < 0 ? 0.78 - (y % 3 === 0 ? 0.15 : 0) : 0.35 - (y % 3 === 0 ? 0.1 : 0));
+    }
+    // the Sphinx lying in front
+    a.ball(50, G - 5, 9, 6, stone, true); a.box(26, G - 8, 26, 9, stone); a.box(14, G - 3, 16, 4, stone);
+    a.box(24, G - 20, 9, 12, stone); a.ball(28, G - 19, 5, 5, stone, true);
+    for (let y = G - 23; y < G - 9; y += 2) { a.put(23, y, hexRgb('#3a5aa8')); a.put(33, y, hexRgb('#3a5aa8')); a.put(23, y + 1, GOLD[1]); a.put(33, y + 1, GOLD[1]); }
+    a.rect(24, G - 24, 9, 1, hexRgb('#3a5aa8'));
+    a.put(26, G - 19, DARK); a.put(29, G - 19, DARK); a.line(26, G - 15, 29, G - 15, stone[4]);
+    // a palm tree
+    a.limb(61, G, 59, G - 16, 1.4, 1, ramp('#8a5a30'));
+    for (const [dx, dy] of [[-6, 2], [6, 3], [-4, -3], [5, -2], [0, -5]]) a.line(59, G - 16, 59 + dx, G - 16 + dy, hexRgb('#2fb04a'));
+    a.outline();
+    return a.canvas();
+  }
+  function bakeTokyo() {
+    const a = new Art(66, 56), G = a.h - PLINTH - 1, red = ramp('#e8442e'), wht = ramp('#f4ece0');
+    plinth(a, '#e8283e', '#fffaf0');
+    // Mount Fuji behind, snow on top
+    a.poly([[14, G + 1], [40, 8], [66, G + 1]], null, ramp('#5a6a9a'));
+    a.poly([[34, 14], [40, 8], [46, 14], [43, 13], [40, 16], [37, 13]], hexRgb('#fffaf0'));
+    // Tokyo Tower, red and white, oversized
+    for (let y = 1; y <= G; y++) {
+      const hw = 0.7 + Math.pow(y / G, 2.1) * 10, band = Math.floor(y / 5) & 1 ? red : wht;
+      for (let dx = -Math.floor(hw); dx <= hw; dx++) {
+        const ad = Math.abs(dx), edge = ad > hw - 1.4;
+        if (y > G - 7 && ad < (y - (G - 7)) * 1.2 + 1.5 && ad < hw - 2.5) continue;
+        if (edge || (dx + y) % 3 === 0 || y < 5) a.tone(12 + dx, y, band, dx < 0 ? 0.8 : 0.4);
+      }
+    }
+    a.box(7, 17, 11, 3, wht); a.box(9, 8, 7, 2, wht);
+    // a pagoda on the right
+    for (let k = 0; k < 4; k++) {
+      const y = G - 7 - k * 7, w = 18 - k * 3, x = 55 - w / 2;
+      a.box(x + 3, y + 2, w - 6, 5, red);
+      a.poly([[x - 1, y + 2], [x + 2, y - 1], [x + w - 2, y - 1], [x + w + 1, y + 2]], null, ramp('#3a2a48'));
+    }
+    a.rect(55, G - 36, 1, 6, GOLD[1]);
+    // a torii gate in front
+    a.box(25, G - 11, 2, 12, red); a.box(36, G - 11, 2, 12, red);
+    a.box(23, G - 11, 17, 2, red); a.poly([[21, G - 14], [41, G - 14], [40, G - 12], [22, G - 12]], hexRgb('#2a2236'));
+    a.outline();
+    return a.canvas();
+  }
+
+  // Each one's lazily drawn picture, the name on its block, and what moves on it each frame.
+  const SETS = {
+    ape: { make: bakeApe },
+    lizard: { make: bakeLizard, anim: (x, y, t, p) => {   // now and then it breathes a glowing beam down the track
+      const k = ((t + p.ph) % 5) / 5;
+      if (k > 0.78) for (let i = 0; i < 30; i++) {
+        if (Math.random() < 0.25) continue;
+        px(x + 3 - i, y + 11 + Math.round(Math.sin(i * 0.9 + t * 20) * (i / 14)), i < 6 ? '#ffffff' : i & 1 ? '#3ff8ff' : '#bff6ff');
+      }
+    } },
+    wolf: { make: bakeWolf, anim: (x, y, t) => { if (Math.floor(t * 1.3) & 1) { px(x + 14, y + 8, '#ff3b5c'); px(x + 15, y + 8, '#ff3b5c'); } } },
+    robot: { make: bakeRobot, anim: (x, y, t) => {   // the visor scans and the chest panel blinks
+      px(x + 13 + Math.round((Math.sin(t * 2.5) + 1) * 7.5), y + 5, '#ff3b5c');
+      for (let i = 0; i < 6; i++) if ((Math.floor(t * 4) + i * 3) % 5 < 2) px(x + 11 + (i % 3) * 4, y + 16 + Math.floor(i / 3) * 4, ['#3ff8ff', '#ffe600', '#2fd06a'][i % 3]);
+    } },
+    clown: { make: bakeClown, anim: (x, y, t) => { if (Math.floor(t * 2) & 1) { px(x + 23, y + 25, '#ffffff'); } } },
+    windmill: { make: bakeWindmill, city: 'HOLLAND', anim: (x, y, t) => {   // the sails turn
+      const hx = x + 22, hy = y + 12;
+      for (let k = 0; k < 4; k++) {
+        const a = t * 1.2 + k * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
+        for (let s = 2; s <= 17; s++) {
+          px(Math.round(hx + ca * s), Math.round(hy + sa * s), '#5a3a2a');
+          if (s > 5) for (let w = 1; w <= 3; w++) px(Math.round(hx + ca * s - sa * w), Math.round(hy + sa * s + ca * w), (s + w) & 1 ? '#fffaf0' : '#d8cfbe');
+        }
+      }
+      ctx.fillStyle = '#3a2a20'; ctx.fillRect(hx - 1, hy - 1, 3, 3);
+    } },
+    paris: { make: bakeParis, city: 'PARIS', anim: (x, y, t) => { if (Math.floor(t * 2) & 1) px(x + 16, y + 1, '#ff3b5c'); } },
+    london: { make: bakeLondon, city: 'LONDON', anim: (x, y, t) => {   // Big Ben's hands go round (fast)
+      for (const [r, sp] of [[3, 0.5], [2, 0.04]]) { const g = t * sp * Math.PI * 2; for (let s = 1; s <= r; s++) px(x + 8 + Math.round(Math.sin(g) * s), y + 11 - Math.round(Math.cos(g) * s), '#1f1830'); }
+    } },
+    newyork: { make: bakeNewYork, city: 'NEW YORK', anim: (x, y, t) => {   // the torch flickers
+      px(x + 16, y + 1, Math.floor(t * 9) & 1 ? '#ff8a20' : '#ffe600'); px(x + 16 + (Math.floor(t * 7) & 1), y, '#ffe600');
+    } },
+    italy: { make: bakeItaly, city: 'ITALIA' },
+    cairo: { make: bakeCairo, city: 'CAIRO' },
+    tokyo: { make: bakeTokyo, city: 'TOKYO', anim: (x, y, t) => { if (Math.floor(t * 1.5) & 1) px(x + 12, y + 1, '#ff3b5c'); } },
+  };
+
+  // In front of the wheels: tunnel bodies (the wheels go out of sight inside) and glass pipes (they don't).
+  function drawFront(cx, t) {
+    for (const p of pieces) {
+      if (p.x1 < cx - 10 || p.x0 > cx + W + 10) continue;
+      if (p.type === 'arch') drawArch(p, cx, t);
+      else if (p.type === 'tunnel' && p.set) {
+        // a set piece: its picture sits on the track's bottom edge, then whatever moves on it, and the
+        // name painted on its block
+        const s = SETS[p.set], x = Math.round(p.ax - cx), y = BASE + 4 - p.art.height;
+        ctx.drawImage(p.art, x, y);
+        if (s.anim) s.anim(x, y, t, p);
+        if (s.city) drawText(s.city, x + (p.art.width >> 1), y + p.art.height - PLINTH + 5, '#fffaf0');
+      } else if (p.type === 'tunnel') {
+        const a = p.ta - cx, b = p.tb - cx, top = BASE - 15;
+        // the body: dark brickwork with a row of lights along the top
+        ctx.fillStyle = '#2a2236'; ctx.fillRect(a, top, b - a, BASE + 4 - top);
+        ctx.fillStyle = '#3a3046';
+        for (let y = top + 1; y < BASE + 4; y += 3) ctx.fillRect(a, y, b - a, 1);
+        for (let y = top; y < BASE + 4; y += 3) for (let x = a + ((y / 3) & 1) * 3; x < b; x += 6) px(x, y + 1, '#3a3046'), px(x, y + 2, '#3a3046');
+        for (let x = a + 3; x < b - 2; x += 5) px(x, top - 1, (Math.floor(x / 5) + Math.floor(t * 4)) % 3 ? '#ffd84a' : '#fff3a8');
+        // stone portals at each end, round-topped
+        for (const [x0, dir] of [[a, 1], [b, -1]]) {
+          for (let dy = 0; dy < BASE + 4 - top + 3; dy++) {
+            const y = top - 3 + dy, edge = dy < 2;
+            ctx.fillStyle = edge ? '#a89cb8' : dy & 1 ? '#7a6e8a' : '#8a7e9a';
+            ctx.fillRect(dir > 0 ? x0 - 3 : x0, y, 3, 1);
+          }
+          px(dir > 0 ? x0 - 2 : x0 + 1, top - 4, '#a89cb8');
+        }
+      } else if (p.type === 'pipe') {
+        // a glass tube: tinted inside, bright rims top and bottom, a sheen, joints and flanged ends
+        const a = Math.round(p.x0 - cx), b = Math.round(p.x1 - cx), top = BASE - 13;
+        ctx.fillStyle = 'rgba(160,230,255,0.12)'; ctx.fillRect(a, top, b - a, 13);
+        ctx.fillStyle = 'rgba(200,240,255,0.75)'; ctx.fillRect(a, top, b - a, 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        for (let x = a; x < b; x++) if ((x + Math.floor(t * 20)) % 9 < 5) ctx.fillRect(x, top + 2, 1, 1);
+        ctx.fillStyle = 'rgba(200,240,255,0.4)';
+        for (let x = a + 12; x < b - 6; x += 14) ctx.fillRect(x, top, 1, 13);
+        ctx.fillStyle = 'rgba(220,245,255,0.85)'; ctx.fillRect(a, top - 1, 2, 15); ctx.fillRect(b - 2, top - 1, 2, 15);
+      }
+    }
+  }
+
   // ---- casino & pinball art ----
   const PIPS = { 1: [[3, 3]], 2: [[1, 1], [5, 5]], 3: [[1, 1], [3, 3], [5, 5]], 4: [[1, 1], [5, 1], [1, 5], [5, 5]],
     5: [[1, 1], [5, 1], [3, 3], [1, 5], [5, 5]], 6: [[1, 1], [5, 1], [1, 3], [5, 3], [1, 5], [5, 5]] };
@@ -828,7 +1340,7 @@
     const x = p.cx - cx, top = BASE - 44, spinning = p.reels.some(r => r.until > simT), hot = simT - p.won < 3;
     const chase = Math.floor(t * (hot ? 16 : 5));
     const rect = (c, a, b, w, h) => { ctx.fillStyle = c; ctx.fillRect(x + a, top + b, w, h); };
-    for (const lx of [-15, 13]) { rect('#d8d8e8', lx, 28, 1, 16); rect('#8a8aa0', lx + 1, 28, 1, 16); }
+    for (const lx of [-15, 14]) { rect('#d8d8e8', lx, 28, 1, 16); rect('#8a8aa0', lx + 1, 28, 1, 16); }
     // the cabinet, lit from the left, with chrome trim
     rect('#c4203e', -15, 8, 31, 20); rect('#e04a5e', -15, 8, 2, 20); rect('#8e1530', 14, 8, 2, 20);
     rect('#d8d8e8', -15, 8, 31, 1); rect('#8a8aa0', -15, 27, 31, 1);
@@ -1090,7 +1602,10 @@
   function bakeWagon(kind) {
     const a = ANIMALS[kind];
     return bake(14, 11, () => {
-      const paint = (ox, oy) => a.rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) if (row[i] !== '.') px(ox + i, oy + j, a.c[row[i]]); });
+      // (the drawings face left; flipped here so the animals face the way the train goes)
+      const paint = (ox, oy) => a.rows.forEach((row, j) => {
+        for (let i = 0; i < row.length; i++) { const ch = row[row.length - 1 - i]; if (ch !== '.') px(ox + i, oy + j, a.c[ch]); }
+      });
       if (kind === 'elephant') {
         // too big for a cage: it rides on a flatcar
         paint(3, 1);
@@ -1108,8 +1623,9 @@
     });
   }
   let LOCO = null;
+  // drawn facing left, then flipped so it leads the train along to the right
   function bakeLoco() {
-    return bake(18, 12, () => {
+    const left = bake(18, 12, () => {
       ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 0, 5, 1); ctx.fillRect(3, 1, 3, 2);   // smokestack
       ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 3, 10, 5);                           // boiler
       ctx.fillStyle = '#4a4660'; ctx.fillRect(2, 3, 10, 1);
@@ -1125,20 +1641,40 @@
         px(wx + dx, 10 - (r === 1 ? 0 : 1) + dy, d > r - 0.6 ? '#d8283e' : '#2a2236');
       }
     });
+    return bake(18, 12, () => { ctx.scale(-1, 1); ctx.drawImage(left, -18, 0); });
+  }
+  // the caboose at the back: a red car with a lookout cupola, lit windows, a railed back porch and a lantern
+  let CABOOSE = null;
+  function bakeCaboose() {
+    return bake(14, 13, () => {
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(4, 0, 6, 1);
+      ctx.fillStyle = '#c4203e'; ctx.fillRect(5, 1, 4, 2);
+      ctx.fillStyle = '#fff3a8'; ctx.fillRect(6, 1, 2, 1);
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(1, 3, 13, 1);
+      ctx.fillStyle = '#c4203e'; ctx.fillRect(2, 4, 12, 6);
+      ctx.fillStyle = '#e04a5e'; ctx.fillRect(2, 4, 12, 1);
+      ctx.fillStyle = '#fff3a8'; ctx.fillRect(4, 5, 2, 2); ctx.fillRect(8, 5, 2, 2);
+      ctx.fillStyle = '#ffd84a'; ctx.fillRect(2, 9, 12, 1);
+      ctx.fillStyle = '#c9c8d8'; ctx.fillRect(0, 5, 1, 5); ctx.fillRect(0, 5, 2, 1);   // the back porch railing
+      px(0, 4, '#ff3b5c');                                                           // the lantern
+      ctx.fillStyle = '#3a3450'; ctx.fillRect(0, 10, 14, 1);
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(2, 11, 2, 2); ctx.fillRect(10, 11, 2, 2);
+      px(2, 11, '#ffd84a'); px(10, 11, '#ffd84a');
+    });
   }
   let train = null, trainAt = rnd(6, 16);
   const smoke = [];
   function updateTrain(dt, off) {
     if (!train && simT > trainAt) {
       const cars = [...Object.keys(ANIMALS)].sort(() => Math.random() - 0.5).slice(0, ri(3, 4));
-      train = { x: off - 18 - cars.length * 15, cars, puff: 0 };   // in from the left, steaming along to the right
+      train = { x: off - 18 - cars0({ cars }), cars, puff: 0 };   // in from the left, steaming along to the right
     }
     if (!train) return;
     train.x += 62 * dt;
-    if ((train.puff -= dt) < 0) { train.puff = 0.22; smoke.push({ x: train.x + cars0(train) + 4, y: BASE - 12, r: 1, l: 1.4 }); }
+    if ((train.puff -= dt) < 0) { train.puff = 0.22; smoke.push({ x: train.x + cars0(train) + 12, y: BASE - 12, r: 1, l: 1.4 }); }   // from the (flipped) stack
     if (train.x - off > W + 10) { train = null; trainAt = simT + rnd(25, 55); }
   }
-  const cars0 = tr => tr.cars.length * 15;   // the engine comes after its wagons
+  const cars0 = tr => 15 + tr.cars.length * 15;   // the caboose and wagons come before the engine
   function drawTrain(off) {
     // smoke puffs: little round clouds that grow and fade as they drift up
     for (const q of smoke) {
@@ -1150,11 +1686,49 @@
     ctx.globalAlpha = CIRCUS.alpha;
     if (!train) return;
     let x = Math.round(train.x - off);
+    ctx.drawImage(CABOOSE ??= bakeCaboose(), x, BASE - 12); x += 15;
     for (const kind of train.cars) { ctx.drawImage(WAGONS[kind] ??= bakeWagon(kind), x, BASE - 10); x += 15; }
     ctx.drawImage(LOCO ??= bakeLoco(), x - 1, BASE - 11);
   }
 
+  // ---- fireworks: now and then a few rockets go up behind the skyline and burst into falling sparks ----
+  const FW = { shells: [], sparks: [], next: rnd(4, 10) };
+  const FW_COLS = [['#ff3bd0', '#ffd84a'], ['#3ff8ff', '#fffaf0'], ['#ffe600', '#ff8a20'], ['#2fd06a', '#fff3a8'], ['#ff3b5c', '#fffaf0']];
+  function fireworks(dt) {
+    if ((FW.next -= dt) < 0) {
+      FW.next = rnd(6, 18);
+      for (let i = ri(1, 4); i > 0; i--)
+        FW.shells.push({ x: rnd(W * 0.08, W * 0.92), y: BASE + 2, vy: -rnd(72, 92), fuse: rnd(0.55, 0.85), wait: i * rnd(0.2, 0.45), c: pick(FW_COLS) });
+    }
+    const sky = H - ROWS + 6;   // never burst above the top of the strip
+    for (let i = FW.shells.length - 1; i >= 0; i--) {
+      const s = FW.shells[i];
+      if ((s.wait -= dt) > 0) continue;
+      s.vy += 40 * dt; s.y += s.vy * dt; s.fuse -= dt;
+      if (s.fuse <= 0 || s.y < sky) {
+        const n = ri(18, 30), spd = rnd(22, 36);
+        for (let k = 0; k < n; k++) {
+          const a = k / n * Math.PI * 2 + rnd(-0.1, 0.1), v = spd * rnd(0.75, 1);
+          FW.sparks.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, l: rnd(0.9, 1.4), c: s.c[k & 1] });
+        }
+        FW.shells.splice(i, 1);
+      }
+    }
+    for (const q of FW.sparks) { q.vy += 22 * dt; q.vx *= 1 - dt; q.vy *= 1 - dt * 0.5; q.x += q.vx * dt; q.y += q.vy * dt; q.l -= dt; }
+    for (let i = FW.sparks.length - 1; i >= 0; i--) if (FW.sparks[i].l <= 0) FW.sparks.splice(i, 1);
+    for (const s of FW.shells) if (s.wait <= 0) {
+      px(Math.round(s.x), Math.round(s.y), '#fff3a8');
+      ctx.globalAlpha = 0.4; px(Math.round(s.x), Math.round(s.y) + 1, '#ffd84a'); px(Math.round(s.x), Math.round(s.y) + 2, '#ff8a20'); ctx.globalAlpha = 1;
+    }
+    for (const q of FW.sparks) {
+      if (q.l < 0.35 && Math.random() < 0.4) continue;   // twinkling out
+      ctx.globalAlpha = Math.min(1, q.l / 0.6); px(Math.round(q.x), Math.round(q.y), q.c);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function drawScenery(t, dt) {
+    fireworks(dt);
     for (const L of LAYERS) {
       fillLayer(L);
       const off = camX * L.par;
@@ -1196,6 +1770,9 @@
     A: '.#.|#.#|###|#.#|#.#', B: '##.|#.#|##.|#.#|##.', C: '.##|#..|#..|#..|.##', J: '..#|..#|..#|#.#|.#.',
     K: '#.#|#.#|##.|#.#|#.#', M: '#.#|###|###|#.#|#.#', N: '##.|#.#|#.#|#.#|#.#', O: '.#.|#.#|#.#|#.#|.#.',
     P: '##.|#.#|##.|#..|#..', S: '.##|#..|.#.|..#|##.', T: '###|.#.|.#.|.#.|.#.', U: '#.#|#.#|#.#|#.#|###',
+    D: '##.|#.#|#.#|#.#|##.', E: '###|#..|##.|#..|###', G: '.##|#..|#.#|#.#|.##', I: '###|.#.|.#.|.#.|###',
+    L: '#..|#..|#..|#..|###', R: '##.|#.#|##.|#.#|#.#', V: '#.#|#.#|#.#|#.#|.#.', W: '#.#|#.#|###|###|#.#',
+    Y: '#.#|#.#|.#.|.#.|.#.',
   };
   function drawText(str, x, y, c) {
     const chars = [...str], x0 = Math.round(x - (chars.length * 4 - 1) / 2), y0 = Math.round(y);
@@ -1426,6 +2003,7 @@
       // from the bubble's bottom edge, above the wheel where it can be, to just over the wheel itself
       const wx = (r.x - cx) * SCALE, wy = top0 + (r.y - RW - 1.5) * SCALE;
       const ax = clamp(wx, left + 3 * PXS, left + r.bw - 3 * PXS), ay = y + r.bh + PXS;
+      b.style.setProperty('--ox', (ax - left).toFixed(1) + 'px');
       DOTS.forEach((d, i) => {
         const dx = ax + (wx - ax) * d.at - d.size / 2, dy = ay + (wy - ay) * d.at - d.size / 2;
         r.dots[i].style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px)`;
@@ -1531,6 +2109,7 @@
     for (const q of parts) px(Math.round(q.x) - cx, Math.round(q.y), q.c);
     for (const r of riders) if (!r.deadUntil) drawWheel(r, cx);
     drawWheel(wh, cx);
+    drawFront(cx, t);
     for (const q of rings) {
       ctx.globalAlpha = Math.min(1, q.l / 0.2);
       for (let i = 0; i < 24; i++) px(Math.round(q.x + Math.cos(i / 24 * 6.283) * q.r) - cx, Math.round(q.y + Math.sin(i / 24 * 6.283) * q.r), '#fff3a8');
