@@ -289,16 +289,19 @@
 
   function flat(len) { const p = push({ type: 'flat', len }); p.g = () => BASE; return p; }
 
-  function hill() {
-    const A = rnd(5, 13 + UP / 6), L = ri(50, 90);
+  // (with o.belt, a chain lift up its near side, for when it's too steep to coast up)
+  function hill(o) {
+    const { A, L } = o;
     const p = push({ type: 'hill', len: L });
     p.g = x => BASE - A * (1 - Math.cos(2 * Math.PI * (x - p.x0) / L)) / 2;
+    if (o.belt) p.belts = [{ a: p.x0, b: p.x0 + L / 2, v: CHAIN }];
   }
 
   // The base of the track itself rises a few pixels (on scaffolding) or sinks a little for a stretch.
   function level(o) {
     const r = 30, p = push({ type: 'level', len: o.L + 2 * r });
     p.g = x => { const u = x - p.x0; return BASE - o.D * smooth(clamp(Math.min(u, p.len - u) / r, 0, 1)); };
+    if (o.belt) p.belts = [o.D > 0 ? { a: p.x0, b: p.x0 + r, v: CHAIN } : { a: p.x1 - r, b: p.x1, v: CHAIN }];
   }
 
   function bumps() {
@@ -489,11 +492,13 @@
     const { L, A } = o, p = push({ type: 'braid', len: L }), s = x => (x - p.x0) / L;
     p.lanes = [x => BASE - A * Math.sin(Math.PI * s(x)) ** 2, x => BASE - A * 0.55 * Math.sin(2 * Math.PI * s(x)) ** 2];
     p.g = p.lanes[0]; p.mainLane = o.lane; p.frontLane = 1;
+    if (o.belt) p.belts = [{ a: p.x0, b: p.x0 + L / 2, v: CHAIN, lane: 0 }, { a: p.x0, b: p.x0 + L / 4, v: CHAIN, lane: 1 }, { a: p.x0 + L / 2, b: p.x0 + L * 3 / 4, v: CHAIN, lane: 1 }];
   }
   function split(o) {
     const { A } = o, up = rampFor(A), L = o.L + 2 * (up - 36), p = push({ type: 'split', len: L });
     p.lanes = [() => BASE, x => { const u = x - p.x0; return BASE - A * smooth(clamp(Math.min(u, L - u) / up, 0, 1)); }];
     p.g = p.lanes[0]; p.mainLane = o.lane; p.ramp = up; p.A = A;   // (its deck hangs from a suspension bridge)
+    if (o.belt) p.belts = [{ a: p.x0, b: p.x0 + up, v: CHAIN, lane: 1 }];
   }
 
   // How long a ramp up to height h is: long enough that a wheel coming over the top at speed stays on it
@@ -518,6 +523,7 @@
   function girders(o) {
     const { w } = o, H = 2 * TIER + TILT + 13, p = deck('girders', H, w, 24), top = p.top, xe = p.xe, xl = xe - w + 2;
     p.mainLane = o.lane;
+    if (o.belt) p.belts = [{ a: p.x0, b: p.xs, v: CHAIN, lane: 1 }];
     const t1 = { xa: xl, xb: xe, ya: top + TIER + TILT, yb: top + TIER }, t2 = { xa: xl, xb: xe - 1, ya: top + 2 * TIER, yb: top + 2 * TIER + TILT };
     const pts = [], turns = [];
     // a hairpin: half an ellipse from (x, y0) down to (x, y1), bulging out sideways (dir) by rx
@@ -595,6 +601,7 @@
   function funnel(o) {
     const { H, R } = o, p = deck('funnel', H, 24 + R, R + 30);
     p.mainLane = o.lane; p.fx = p.xe; p.R = R; p.H = H;
+    if (o.belt) p.belts = [{ a: p.x0, b: p.xs, v: CHAIN, lane: 1 }];
     p.trig = p.xe; p.onTrig = w => { if (laneOf(w, p) === 1) { w.mode = 'funnel'; w.fun = p; w.th = -Math.PI / 2; w.k = 0; w.fv = w.v; } };
   }
 
@@ -647,7 +654,8 @@
       const gap = ri(30, 60);
       return [{ gap }, { gap, power: 140 }, { gap, power: 180 }, { gap: 26 }];
     }
-    if (k === 'girders') { const w = ri(50, 70); return [{ w, lane: 1 }, { w, lane: 0 }]; }
+    if (k === 'hill') { const A = rnd(5, 13 + UP / 6), L = ri(50, 90); return [{ A, L }, { A: Math.min(A, 8), L }, { A, L, belt: true }]; }
+    if (k === 'girders') { const w = ri(50, 70); return [{ w, lane: 1 }, { w, lane: 1, belt: true }, { w, lane: 0 }]; }
     if (k === 'kicker') { const dir = pick(Object.keys(KICKS)); return [{ dir }, { dir: 'up' }, { dir: 'long' }]; }
     if (k === 'pinfield') {
       // a few layouts of 3 or 4 bumpers floating where the spring throws the wheel
@@ -656,10 +664,10 @@
     }
     if (k === 'funnel') {
       const H = ri(26, Math.max(26, Math.min(36 + Math.floor(UP / 3), ROWS - 30))), R = ri(14, 18);
-      return [{ H, R, lane: 1 }, { H: 26, R: 14, lane: 1 }, { H, R, lane: 0 }];
+      return [{ H, R, lane: 1 }, { H, R, lane: 1, belt: true }, { H: 26, R: 14, lane: 1, belt: true }, { H, R, lane: 0 }];
     }
     if (k === 'cones') return [{ n: ri(3, 6) }];
-    if (k === 'level') return [{ D: pick([-3, -4, 5, 6, 8, 10]), L: ri(90, 200) }, { D: 5, L: 90 }];
+    if (k === 'level') { const D = pick([-3, -4, 5, 6, 8, 10]), L = ri(90, 200); return [{ D, L }, { D, L, belt: true }, { D: 5, L: 90, belt: true }]; }
     if (k === 'loop') {
       // going round needs about √(5.6·g·r) at the bottom: no pad if it's already going that fast,
       // otherwise start from that and go up
@@ -669,7 +677,7 @@
     if (k === 'braid' || k === 'split') {
       // the streamer's wheel takes either lane, whichever the ghost gets along
       const L = ri(150, 200), A = ri(14, Math.max(14, Math.min(24 + Math.floor(UP / 3), ROWS - 40))), lane = ri(0, 1);
-      return [{ L, A, lane }, { L, A, lane: 1 - lane }, { L, A: 12, lane: 0 }];
+      return [{ L, A, lane }, { L, A, lane, belt: true }, { L, A, lane: 1 - lane }, { L, A, lane: 1 - lane, belt: true }, { L, A: 12, lane: 0, belt: true }];
     }
     if (k === 'coaster') {
       // as high as fits in the strip, with a loop at the bottom of the drop when the drop is fast enough
@@ -693,7 +701,7 @@
   let SIM = false;   // true while a ghost rides (no sparks, scores or flashing machines)
   const STEP = 1 / 240;
   const ghost = Object.assign(wheel(RW + 2, CRUISE, MAIN_PAL), { main: true, ghost: true });
-  const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot', 'path', 's', 'fun', 'k', 'fv'];
+  const STATE = ['x', 'y', 'v', 'vx', 'vy', 'mode', 'loop', 'th', 'v0', 'gvy', 'boostT', 'rot', 'path', 's', 'fun', 'k', 'fv', 'plat'];
   const stateOf = w => Object.fromEntries(STATE.map(k => [k, w[k]]));
   // Rides up to just short of the end of the track built so far (so it never sees past it, where the
   // ground isn't there yet). False if it falls, stalls in a loop or hits something on the way.
@@ -715,13 +723,15 @@
     // floating bumpers, where any difference sends a wheel somewhere else entirely; the streamer's wheel
     // repeats the ghost exactly anyway)
     const twin = f => Object.assign(wheel(0, CRUISE, MAIN_PAL), s, { main: true, ghost: true, v: s.v * f, vx: s.vx * f });
+    const nr = ruins.length;
+    if (RUINABLE.has(k) && Math.random() < 0.18) addRuin(pieces[n].x0, genX);   // (sometimes old track over it)
     const rec = Math.random() < 0.22 ? [] : null;   // (sometimes the ghost's way through gets coins along it)
     let ok = (k === 'pinfield' || (ride(twin(0.95)) && ride(twin(1.05)))) && ride(ghost, rec);
     // and the next piece only starts once it's back on solid track
     while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost); }
     SIM = false;
     if (ok && rec) placeCoins(rec);
-    if (!ok) { pieces.length = n; genX = gx; Object.assign(ghost, s, { fell: false, stalled: false, crashed: false }); }
+    if (!ok) { pieces.length = n; genX = gx; ruins.length = nr; Object.assign(ghost, s, { fell: false, stalled: false, crashed: false }); }
     return ok;
   }
 
@@ -749,6 +759,7 @@
       }
     }
     for (let i = coins.length - 1; i >= 0; i--) if (coins[i].x < camX - 40) coins.splice(i, 1);
+    for (let i = ruins.length - 1; i >= 0; i--) if (ruins[i].xb < camX - 100) ruins.splice(i, 1);
   }
   // a gold coin turning on its edge (or, just taken, floating up and fading)
   function drawCoins(cx, t) {
@@ -764,6 +775,65 @@
       }
       if (hw) px(x - hw + 1, y - 1, '#fff3a8');
       ctx.globalAlpha = 1;
+    }
+  }
+
+  // Old broken track up on rickety wooden stilts, over the track now and then: the route never goes up
+  // onto it, but a wheel that comes down on it rolls along it and drops off the end, and one that comes up
+  // under it bounces off it. One or two stretches with a gap between, rusted, with a drooping broken end.
+  const ruins = [];
+  const RUINABLE = new Set(['hill', 'bumps', 'level', 'jump', 'kicker', 'bumper', 'hazard', 'cones', 'dominoes', 'targets', 'flipper']);
+  function addRuin(x0, x1) {
+    const span = x1 - x0; if (span < 50) return;
+    const len = ri(34, Math.min(80, span - 10)), xa = Math.round(x0 + rnd(5, span - len - 5)), xb = xa + len;
+    let top = BASE; for (let x = xa - 6; x <= xb + 6; x += 2) { const g = groundAt(x); if (g != null) top = Math.min(top, g); }
+    const y = Math.round(top - 2 * RW - ri(8, 16));
+    if (y < BASE - ROWS + 24) return;
+    const segs = [];
+    if (len > 50 && Math.random() < 0.6) { const c = Math.round(xa + len * rnd(0.35, 0.6)), g = ri(5, 9); segs.push({ a: xa, b: c, y, brokeB: true }, { a: c + g, b: xb, y, brokeA: true }); }
+    else segs.push({ a: xa, b: xb, y });
+    ruins.push({ xa, xb, y, segs, seed: ri(0, 1e6) });
+  }
+  // a wheel in the air meets a stretch of it: lands on top (rolling on), or knocks its head underneath
+  function hitRuins(w, ay) {
+    for (const r of ruins) {
+      if (w.x < r.xa - 1 || w.x > r.xb + 1) continue;
+      for (const sg of r.segs) {
+        if (w.x < sg.a || w.x > sg.b) continue;
+        const top = sg.y - RW, under = sg.y + 3 + RW;
+        if (w.vy > 0 && ay <= top + 0.5 && w.y >= top) {
+          w.y = top;
+          if (w.vy > 170) { w.vy = -w.vy * 0.28; return; }   // a hard landing bounces a little first
+          w.mode = 'plat'; w.plat = sg; w.v = Math.max(20, Math.abs(w.vx)); w.gvy = null;
+          emit(w.x, sg.y, 4, ['#a85a30', '#e8d9b0'], 30, 30, 220);
+          return;
+        }
+        if (w.vy < 0 && ay >= under - 0.5 && w.y < under) { w.y = under; w.vy = -w.vy * 0.4; emit(w.x, sg.y + 3, 4, ['#a85a30', '#6a3a22'], 30, 10, 200); return; }
+      }
+    }
+  }
+  function drawRuins(cx) {
+    for (const r of ruins) {
+      if (r.xb < cx - 10 || r.xa > cx + W + 10) continue;
+      let h = r.seed;
+      const rnd2 = () => ((h = Math.imul(h ^ (h >>> 15), 2246822519) + 0x9e3779b9 | 0) >>> 0) / 4294967296;
+      // the stilts, down behind the track, with cross braces between; one now and then missing or leaning
+      for (let x = r.xa + 2; x < r.xb - 1; x += 8) {
+        const gone = rnd2() < 0.15, lean = rnd2() < 0.2 ? (rnd2() < 0.5 ? -1 : 1) : 0, sx = x - cx;
+        if (gone) continue;
+        for (let y = r.y + 3; y < BASE + 2; y++) px(sx + Math.round(lean * (y - r.y) / (BASE - r.y) * 3), y, '#5a3a28');
+        if (x + 8 < r.xb - 1) for (let i = 0; i < 8; i++) { px(sx + i, r.y + 4 + Math.round(i * (BASE - r.y - 6) / 8), '#3a2418'); }
+      }
+      for (const sg of r.segs) {
+        for (let x = Math.ceil(sg.a); x <= sg.b; x++) {
+          const sx = x - cx;
+          px(sx, sg.y, ((x * 7 + r.seed) % 9) ? '#a85a30' : '#6a6a60'); px(sx, sg.y + 1, '#7a3a22'); px(sx, sg.y + 2, '#4a2418');
+          if (x % 5 === 0) px(sx, sg.y - 1, '#7a3a22');   // what's left of the rail
+        }
+        // a broken end droops down, bent
+        if (sg.brokeB) for (let i = 0; i < 5; i++) { px(Math.round(sg.b + 1 + i / 2 - cx), sg.y + 1 + i, '#7a3a22'); px(Math.round(sg.b + 1 + i / 2 - cx), sg.y + 2 + i, '#4a2418'); }
+        if (sg.brokeA) { px(Math.round(sg.a - 1 - cx), sg.y + 1, '#7a3a22'); px(Math.round(sg.a - 2 - cx), sg.y + 2, '#4a2418'); }
+      }
     }
   }
 
@@ -789,6 +859,7 @@
   function shiftDown(dy) {
     for (const w of [wh, ghost, ...riders]) { w.y += dy; w.trail.forEach(q => q.y += dy); w.ty = null; w.by = null; }
     for (const q of [...parts, ...pops, ...rings, ...DECOR, ...smoke, ...coins]) q.y += dy;
+    for (const r of ruins) { r.y += dy; for (const sg of r.segs) sg.y += dy; }
   }
 
   // Coming up short on a gap. A jump the ghost comes up short on isn't kept, so this is only ever a chat
@@ -844,12 +915,18 @@
       const cs = 1 / Math.sqrt(1 + s * s), sn = s * cs;
       if (w.steer != null) w.v = w.steer;   // arriving and parked chat wheels go exactly as fast as steered
       else {
+        // it rolls on at its cruising speed, but on the way uphill only its own momentum carries it (the
+        // streamer's wheel, anyway): a climb it can't make gets a chain lift (see belts)
         w.v += G * sn * dt * 0.7;
-        w.v += (cruise - w.v) * dt * grip * (w.v > cruise ? 0.6 : 1.2);
+        const pull = (cruise - w.v) * dt * grip * (w.v > cruise ? 0.6 : 1.2);
+        if (!(w.main && sn > 0.01 && pull > 0)) w.v += pull;
       }
-      w.v = w.main ? Math.min(200, Math.max(35, w.v)) : Math.min(RUSH_OUT, Math.max(0, w.v));
+      w.v = w.main ? Math.min(200, Math.max(0, w.v)) : Math.min(RUSH_OUT, Math.max(0, w.v));
+      if (w.ghost && w.v < 8) { w.stalled = true; return; }   // (a piece the ghost would grind to a halt on isn't kept)
       const on = pieceAt(w.x);
       if (on && on.chain) w.v = on.chain;   // a chain lift hauls everything up at its own pace
+      if (on && on.belts) for (const bt of on.belts)
+        if (w.x >= bt.a && w.x < bt.b && w.v < bt.v && (bt.lane == null || laneOf(w, on) === bt.lane)) w.v = bt.v;
       const px = w.x;
       w.x += w.v * cs * dt; w.rot += w.v * dt / RW;
 
@@ -870,9 +947,10 @@
       w.gvy = nvy; w.y = ng - RW;
 
     } else if (w.mode === 'air') {
-      const ax = w.x;
+      const ax = w.x, ay = w.y;
       w.vy += G * dt; w.x += w.vx * dt; w.y += w.vy * dt; w.rot += w.vx * dt / RW;
       bounceOff(w, ax);   // floating bumpers
+      hitRuins(w, ay);
       // a flipper swats anything that comes in low, rolling or not
       for (const p of pieces) if (p.type === 'flipper' && ax < p.trig && w.x >= p.trig && w.y + RW >= BASE - 5) { p.onTrig(w); return; }
       const gy = groundFor(w, w.x);
@@ -882,6 +960,13 @@
         else land(w, gy);
       }
       if (w.y > H + 40) respawn(w);
+
+    } else if (w.mode === 'plat') {
+      // rolling along a stretch of the old track, until it drops off the end
+      const sg = w.plat;
+      if (w.steer != null) w.v = w.steer;
+      w.x += w.v * dt; w.rot += w.v * dt / RW;
+      if (w.x > sg.b || w.x < sg.a) { w.mode = 'air'; w.vx = w.v; w.vy = 0; w.plat = null; }
 
     } else if (w.mode === 'path') {
       // along the girders: gravity along the way it's heading speeds it up downhill, a little rolling drag
@@ -965,6 +1050,31 @@
   // ---------------- drawing ----------------
   function px(x, y, c) { ctx.fillStyle = c; ctx.fillRect(x, y, 1, 1); }
 
+  // A chain lift: a dark channel down the middle of the track with the chain creeping up it, yellow
+  // anti-rollback dogs clicking along beside it, and a motor housing with a turning gear at the foot.
+  function drawBelt(g, a, b, v, cx, t) {
+    for (let wx = Math.ceil(a); wx < b; wx++) {
+      const sx = wx - cx; if (sx < -2 || sx > W + 2) continue;
+      const y = Math.round(g(wx)), ph = (((wx - t * v) % 4) + 4) % 4;
+      px(sx, y, ph < 2 ? '#e8e6f4' : '#3a2c40'); px(sx, y + 1, '#2a1c30');
+      if ((((wx - Math.floor(t * v / 8) * 8) % 8) + 8) % 8 === 0) px(sx, y - 1, '#ffd84a');
+      // the catwalk's handrail alongside, on posts
+      px(sx, y - 5, '#a8a8c0');
+      if (wx % 6 === 0) { ctx.fillStyle = '#7a7a90'; ctx.fillRect(sx, y - 4, 1, 4); }
+    }
+    const fx = Math.round(a) - cx, fy = Math.round(g(a)) + 4, an = t * v / 6;
+    ctx.fillStyle = '#3a3450'; ctx.fillRect(fx - 3, fy, 7, 4); ctx.fillStyle = '#5a5470'; ctx.fillRect(fx - 3, fy, 7, 1);
+    px(fx, fy + 2, '#ffd84a');
+    for (let k = 0; k < 4; k++) px(fx + Math.round(Math.cos(an + k * Math.PI / 2) * 1.5), fy + 2 + Math.round(Math.sin(an + k * Math.PI / 2) * 1.5), '#c9c8d8');
+  }
+  function drawBelts(cx, t) {
+    for (const p of pieces) {
+      if (p.x1 < cx - 10 || p.x0 > cx + W + 10) continue;
+      if (p.type === 'lift') drawBelt(p.g, p.x0, p.x1, p.chain, cx, t);
+      if (p.belts) for (const bt of p.belts) drawBelt(bt.lane == null ? p.g : p.lanes[bt.lane], bt.a, bt.b, bt.v, cx, t);
+    }
+  }
+
   function drawTrack(cx, t) {
     for (let sx = 0; sx < W; sx++) {
       const wx = cx + sx, p = pieceAt(wx);
@@ -995,11 +1105,7 @@
         ctx.fillStyle = C.padDark; ctx.fillRect(sx, BASE - 2 - e, w, 1);
       } else if (p.type === 'arch') drawArch(p, cx, t, 'back');
       else if (p.lanes && p.frontLane == null) drawLane(p, cx, p.lanes[1], false);   // a split's upper deck
-      else if (p.type === 'lift') {
-        // the chain: dark links creeping up the lift
-        for (let wx = Math.ceil(p.x0); wx < p.x1; wx++)
-          if ((((wx - t * p.chain) % 4) + 4) % 4 < 1) px(wx - cx, Math.round(p.g(wx)) + 1, '#3a2030');
-      } else if (p.type === 'dominoes') {
+      else if (p.type === 'dominoes') {
         // each tips over a moment after the one before, coming to rest leaning on the next; the last lies flat
         const n = p.ds.length;
         p.ds.forEach((dx0, i) => {
@@ -1544,21 +1650,30 @@
     a.outline();
     return a.canvas();
   }
+  // the clown: a creepy, grinning one, with a huge bald forehead, red streaks up over it and down to the
+  // corners of its mouth, yellow wall-eyes under a scowl, buck teeth, a big curly red mop of hair either
+  // side, and a pleated ruff with a red pompom
   function bakeClown() {
-    const a = new Art(48, 62), face = ramp('#f6eadc'), hair = ramp('#ff5a2a'), red = ramp('#e8283e'), G = a.h - PLINTH - 1;
+    const a = new Art(48, 62), face = ramp('#f2ece2'), hair = ramp('#ff3a1e'), red = ramp('#d81e2e'), G = a.h - PLINTH - 1;
     plinth(a, '#ffb000', '#3a6ac8');
-    for (const [x, y, r] of [[6, 22, 7], [41, 22, 7], [9, 13, 5], [38, 13, 5], [5, 30, 5], [42, 30, 5]]) a.ball(x, y, r, r, hair, true);   // hair tufts
-    a.ball(24, 23, 16, 16, face, true);                                                   // the face
-    a.poly([[17, 10], [24, 0], [31, 10]], null, ramp('#3a6ac8'));                          // little hat
-    for (let y = 2; y < 10; y += 3) a.line(24 - (y - 0) * 0.6, y, 24 + (y - 0) * 0.6, y, hexRgb('#ffd84a'));
-    a.ball(24, 1, 2, 1.5, GOLD);
-    for (const ex of [17, 31]) {                                                          // painted eyes
-      a.poly([[ex, 15], [ex + 4, 20], [ex, 25], [ex - 4, 20]], hexRgb('#3a6ac8'));
-      a.ball(ex, 20, 2.5, 3, ramp('#ffffff')); a.rect(ex, 20, 1, 2, DARK);
+    for (const [x, y, r] of [[8, 13, 6], [40, 13, 6], [6, 22, 5.5], [42, 22, 5.5], [12, 6, 4.5], [36, 6, 4.5], [9, 30, 4], [39, 30, 4]]) {
+      a.ball(x, y, r, r, hair, true);                                                    // curls
+      a.line(x - 1, y - 1, x + 1, y + 1, hair[3]); a.put(x - 2, y + 1, hair[3]);
     }
-    a.ball(24, 32, 10, 5, red, true); a.rect(17, 31, 15, 2, WHITE); a.line(17, 33, 31, 33, red[4]);   // big grin
-    a.ball(24, 26, 4, 3.5, red, true);                                                    // nose
-    for (let x = 6; x < 44; x += 4) a.ball(x, G - 1, 3, 2.5, ramp(['#ff3bd0', '#3ff8ff', '#ffe600'][(x >> 2) % 3]));   // ruffle collar
+    a.hatch = true;
+    a.ball(24, 21, 12, 15, face);                                                        // the egg-shaped head
+    a.hatch = false;
+    for (const [x0, x1] of [[18, 15], [30, 33]]) { a.line(x0, 16, x1, 6, red[1]); a.line(x0 + (x1 > x0 ? 1 : -1), 16, x1 + (x1 > x0 ? 1 : -1), 6, red[2]); }   // up the forehead
+    a.line(17, 21, 15, 28, red[1]); a.line(31, 21, 33, 28, red[1]);                       // and down to the grin
+    a.line(15, 14, 21, 17, DARK); a.line(33, 14, 27, 17, DARK);                           // the scowl
+    for (const [ex, pupil] of [[19, 18], [29, 30]]) { a.ball(ex, 19, 2.5, 2, ramp('#ffd23f')); a.put(pupil, 19, DARK); a.put(ex, 21, face[4]); }
+    a.ball(24, 24, 2.2, 1.8, red, true);                                                  // little red nose
+    a.poly([[15, 28], [33, 28], [30, 32], [24, 34], [18, 32]], null, ramp('#3a0a14'));    // the grin
+    a.line(15, 28, 33, 28, red[1]); a.line(18, 33, 30, 33, red[2]); a.put(15, 27, red[1]); a.put(33, 27, red[1]);
+    a.rect(22, 29, 2, 3, WHITE); a.rect(25, 29, 2, 3, WHITE);                             // buck teeth
+    for (let x = 6; x < 44; x += 3) a.ball(x, G - 2, 3, 3, ramp(x % 6 ? '#e8e0d0' : '#c8c0b8'));   // the ruff
+    a.ball(24, G - 3, 2.5, 2.5, red, true);
+    a.grunge(41, a.h - PLINTH);
     a.outline();
     return a.canvas();
   }
@@ -1773,9 +1888,9 @@
       for (let i = 0; i < 6; i++) if ((Math.floor(t * (on ? 14 : 4)) + i * 3) % 5 < 2) px(x + 11 + (i % 3) * 4, y + 16 + Math.floor(i / 3) * 4, ['#3ff8ff', '#ffe600', '#2fd06a'][i % 3]);
       if (on && Math.floor(t * 12) & 1) { px(x + 20, y - 1, '#3ff8ff'); px(x + 19, y, '#bff6ff'); px(x + 21, y, '#bff6ff'); }   // sparks off its antenna
     } },
-    clown: { make: bakeClown, shout: 'HONK', anim: (x, y, t, p, on) => {   // its nose lights up and honks
-      if (on ? Math.floor(t * 8) & 1 : Math.floor(t * 2) & 1) px(x + 23, y + 25, '#ffffff');
-      if (on) glow(x + 24, y + 26, '#ff3b5c', 5);
+    clown: { make: bakeClown, shout: 'HONK', anim: (x, y, t, p, on) => {   // its nose glints and honks, and its eyes glow
+      if (on ? Math.floor(t * 8) & 1 : Math.floor(t * 2) & 1) px(x + 23, y + 23, '#ffffff');
+      if (on) { glow(x + 24, y + 24, '#ff3b5c', 4); glow(x + 19, y + 19, '#ffd23f', 3); glow(x + 29, y + 19, '#ffd23f', 3); }
     } },
     windmill: { make: bakeWindmill, city: 'HOLLAND', anim: (x, y, t, p, on) => {   // the sails turn, racing when it's on
       const hx = x + 22, hy = y + 12;
@@ -2004,10 +2119,11 @@
   // it all shows above it. Each building, tent and wagon is drawn once into its own little canvas (see bake()).
   const LAYERS = [
     { par: 0.12, alpha: 0.45, items: [], next: -40, make: skylineItem },
+    { par: 0.22, alpha: 0.8, items: [], next: 60, make: blockItem },
     { par: 0.3, alpha: 0.72, items: [], next: -40, make: circusItem, walkers: [] },
-    { par: 0.55, alpha: 0.92, items: [], next: 120, make: nearItem },
   ];
-  const CIRCUS = LAYERS[1];
+  const BLOCKS = LAYERS[1];
+  const CIRCUS = LAYERS[2];
   function fillLayer(L) {
     const off = camX * L.par;
     while (L.items.length && L.items[0].x + L.items[0].w < off - 60) L.items.shift();
@@ -2055,13 +2171,12 @@
     });
   }
 
-  // ---- nearer by: now and then a tight block of tall city housing, or stilts holding up stretches of
-  // old broken track, with long empty runs between ----
-  function nearItem(x) {
-    const r = Math.random();
-    if (r < 0.45) return { x, w: 0, gap: ri(90, 240), img: null };
-    const img = r < 0.8 ? bakeBlock() : bakeRuin();
-    return { x, w: img.width, gap: ri(140, 320), img };
+  // ---- between the skyline and the circus: now and then a tight block of tall city housing, with long
+  // empty runs between ----
+  function blockItem(x) {
+    if (Math.random() < 0.4) return { x, w: 0, gap: ri(60, 200), img: null };
+    const img = bakeBlock();
+    return { x, w: img.width, gap: ri(80, 260), img };
   }
   const BRICK = ['#5a2a2e', '#4a3044', '#3a3a52', '#5a4032', '#2e3a4a', '#4a2a3a'];
   // Three to six narrow buildings packed side by side, all different heights: brick fronts with rows of
@@ -2112,50 +2227,39 @@
       }
     });
   }
-  // Old track up on rickety wooden stilts, rusted and broken: two or three stretches with gaps between,
-  // a snapped end hanging down, a stilt or two missing or leaning, and planks fallen underneath.
-  function bakeRuin() {
-    const W2 = ri(44, 72), dh = ri(16, 28), H2 = dh + 6;
-    const rust = ['#a85a30', '#7a3a22', '#4a2418'], wood = '#5a3a28', woodD = '#3a2418';
-    // which columns still have track: whole, minus a gap or two
-    const gaps = Array.from({ length: ri(1, 2) }, () => { const a = ri(10, W2 - 16); return [a, a + ri(5, 9)]; });
-    const has = x => !gaps.some(([a, b]) => x >= a && x < b);
-    return bake(W2, H2, () => {
-      const top = H2 - dh;
-      for (let x = 2; x < W2 - 1; x += 8) {   // the stilts, with cross braces between
-        if (Math.random() < 0.15) continue;
-        const lean = Math.random() < 0.2 ? pick([-1, 1]) : 0;
-        for (let y = top + 3; y < H2; y++) px(x + Math.round(lean * (y - top) / dh * 3), y, wood);
-        if (x + 8 < W2 - 1) for (let i = 0; i < 8; i++) { px(x + i, top + 4 + Math.round(i * (dh - 6) / 8), woodD); if (i % 2 === 0) px(x + i, H2 - 2 - Math.round(i * (dh - 6) / 8), woodD); }
-      }
-      for (let x = 0; x < W2; x++) {
-        if (!has(x)) continue;
-        px(x, top, rust[0]); px(x, top + 1, rust[1]); px(x, top + 2, rust[2]);
-        if (Math.random() < 0.15) px(x, top, '#6a6a60');   // a patch of bare iron
-      }
-      // where the track breaks off at a gap, the end on one side droops down, bent
-      for (const [a] of gaps) for (let i = 0; i < 5; i++) { px(a + Math.floor(i / 2), top + 1 + i, rust[1]); px(a + Math.floor(i / 2), top + 2 + i, rust[2]); }
-      for (let n = ri(2, 4); n > 0; n--) { const x = ri(0, W2 - 6); ctx.fillStyle = woodD; ctx.fillRect(x, H2 - 1, ri(3, 6), 1); }   // fallen planks
-    });
+  // Street lamps at the foot of the city blocks, behind the circus: they light the ground in front of the
+  // circus wherever their light gets between the tents (see groundLight).
+  const STREET = { gap: 46 };
+  const lampX = k => k * STREET.gap + (Math.imul(k, 2654435761) >>> 28);
+  function streetLamps(off) {
+    ctx.globalAlpha = 0.8;
+    for (let k = Math.floor((off - 20) / STREET.gap); lampX(k) < off + W + 20; k++) {
+      const x = Math.round(lampX(k) - off), y = BASE - 9;
+      ctx.fillStyle = '#2a2236'; ctx.fillRect(x, y, 1, 10); ctx.fillRect(x, y, 2, 1);
+      px(x + 2, y + 1, '#fff3c0');
+      ctx.fillStyle = 'rgba(255,230,170,0.25)'; ctx.fillRect(x + 1, y + 2, 3, 2);
+    }
+    ctx.globalAlpha = 1;
   }
-  // City glow coming through the gaps between the tents and booths: soft shafts of light slanting down
-  // onto the ground, brightest where they land.
-  function beams(L, off) {
+  // Their light on the ground in front of the circus, between the tents: each gap the light gets through
+  // throws a patch out onto the ground, further along the further it is from the lamp. The lamps and the
+  // tents scroll at different speeds, so the patches slide and stretch as they go by.
+  function groundLight(off) {
+    const loff = camX * BLOCKS.par, items = CIRCUS.items, spread = 0.7;
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i + 1 < L.items.length; i++) {
-      const a = L.items[i], b = L.items[i + 1], x0 = a.x + a.w - off, gw = b.x - a.x - a.w;
-      if (gw < 3 || x0 > W || x0 + gw < -10) continue;
-      // narrow up high, spreading as it comes down, and leaning a little (the glow is off to the left)
-      for (let y = BASE - 22; y < BASE - 1; y++) {
-        const f = (y - BASE + 22) / 22, w = Math.max(1, Math.round(gw * (0.35 + 0.55 * f)));
-        ctx.fillStyle = `rgba(255,210,140,${(0.05 + 0.25 * f).toFixed(3)})`;
-        ctx.fillRect(Math.round(x0 + (gw - w) / 2 + f * 6), y, w, 1);
-      }
-      // the pool of light where it lands, fading out at its ends
-      for (let i = -3; i < gw + 3; i++) {
-        const e = Math.min(i + 4, gw + 3 - i) / 4;
-        ctx.fillStyle = `rgba(255,220,160,${(0.4 * Math.min(1, e)).toFixed(3)})`;
-        ctx.fillRect(Math.round(x0 + 6 + i), BASE - 1, 1, 2);
+    for (let k = Math.floor((loff - 60) / STREET.gap); lampX(k) < loff + W + 60; k++) {
+      const L = lampX(k) - loff + 2;
+      for (let i = 0; i + 1 < items.length; i++) {
+        const g0 = items[i].x + items[i].w - off, g1 = items[i + 1].x - off;
+        // (only from the lamps either side of it, so patches don't pile up into one glow)
+        if (g1 - g0 < 2 || Math.abs((g0 + g1) / 2 - L) > STREET.gap) continue;
+        const a0 = g0 + (g0 - L) * spread, a1 = g1 + (g1 - L) * spread, fade = 1 - Math.abs((g0 + g1) / 2 - L) / STREET.gap;
+        if (a1 < -4 || a0 > W + 4) continue;
+        for (let row = 0; row < 5; row++) {   // brighter towards the front
+          ctx.fillStyle = `rgba(255,214,150,${(fade * (0.05 + 0.06 * row)).toFixed(3)})`;
+          const sk = (4 - row) * 0.15;   // a little narrower at the back
+          ctx.fillRect(Math.round(a0 + (a1 - a0) * sk / 2), BASE - 5 + row, Math.max(1, Math.round((a1 - a0) * (1 - sk))), 1);
+        }
       }
     }
     ctx.globalCompositeOperation = 'source-over';
@@ -2339,7 +2443,7 @@
     }
     if (!train) return;
     train.x += 62 * dt;
-    if ((train.puff -= dt) < 0) { train.puff = 0.22; smoke.push({ x: train.x + cars0(train) + 12, y: BASE - 12, r: 1, l: 1.4 }); }   // from the (flipped) stack
+    if ((train.puff -= dt) < 0) { train.puff = 0.22; smoke.push({ x: train.x + cars0(train) + 13, y: BASE - 12, r: 1, l: 1.4 }); }   // from the (flipped) stack
     if (train.x - off > W + 10) { train = null; trainAt = simT + rnd(25, 55); }
   }
   const cars0 = tr => 15 + tr.cars.length * 15;   // the caboose and wagons come before the engine
@@ -2356,7 +2460,7 @@
     let x = Math.round(train.x - off);
     ctx.drawImage(CABOOSE ??= bakeCaboose(), x, BASE - 12); x += 15;
     for (const kind of train.cars) { ctx.drawImage(WAGONS[kind] ??= bakeWagon(kind), x, BASE - 10); x += 15; }
-    ctx.drawImage(LOCO ??= bakeLoco(), x - 1, BASE - 11);
+    ctx.drawImage(LOCO ??= bakeLoco(), x, BASE - 11);
   }
 
   // ---- fireworks: now and then a few rockets go up behind the skyline and burst into falling sparks ----
@@ -2428,7 +2532,8 @@
         }
       }
       if (L === LAYERS[0]) { ctx.globalAlpha = 1; drawPoles(); }
-      if (L === CIRCUS) beams(L, off);
+      if (L === BLOCKS) streetLamps(off);
+      if (L === CIRCUS) groundLight(off);
       if (L === CIRCUS) {
         updateTrain(dt, off);
         for (const q of smoke) { q.x -= 6 * dt; q.y -= 9 * dt; q.r += 1.6 * dt; q.l -= dt; }
@@ -2998,7 +3103,9 @@
     if (CFG.decor) drawDecor(t);
     if (CFG.scenery) drawAttractions(cx, t);
     drawBacks(cx, t);
+    drawRuins(cx);
     drawTrack(cx, t);
+    drawBelts(cx, t);
     drawRopes(cx);
     drawLamps(cx, t);
     drawCoins(cx, t);
