@@ -228,8 +228,9 @@
   // can fly up above the strip without being cut off.
   const cvs = document.getElementById('c');
   let ctx = cvs.getContext('2d');   // (bake() points it at an offscreen canvas for a moment)
-  const rowsFor = () => Math.max(ROWS, Math.ceil(innerHeight / SCALE));
-  const FLOOR = 14;   // the ground below the track (where the street lamps' light falls)
+  const rowsFor = () => Math.max(ROWS + FLOOR - 8, Math.ceil(innerHeight / SCALE));
+  const FLOOR = 16;   // the road below the track
+  const stripTop = () => BASE + 8 - ROWS;   // the top of the `rows` strip, measured up from the track
   let W = 0, H = rowsFor(), BASE = H - FLOOR, ready = false;
   function resize() {
     W = Math.ceil(innerWidth / SCALE);
@@ -305,6 +306,17 @@
     const r = 30, p = push({ type: 'level', len: o.L + 2 * r });
     p.g = x => { const u = x - p.x0; return BASE - o.D * smooth(clamp(Math.min(u, p.len - u) / r, 0, 1)); };
     if (o.belt) p.belts = [o.D > 0 ? { a: p.x0, b: p.x0 + r, v: CHAIN } : { a: p.x1 - r, b: p.x1, v: CHAIN }];
+  }
+
+  // Stairs: an escalator up (a conveyor, the only way up them), a landing, and a flight of steps down that
+  // wheels drop down one by one.
+  function stairs(o) {
+    const { n, rise, tread } = o, Ht = n * rise, up = rampFor(Ht);
+    const e = push({ type: 'escalator', len: up }); e.g = x => BASE - Ht * smooth(clamp((x - e.x0) / up, 0, 1));
+    e.belts = [{ a: e.x0, b: e.x1, v: CHAIN, steps: true }];
+    const top = push({ type: 'landing', len: 12 }); top.g = () => BASE - Ht;
+    const d = push({ type: 'stairs', len: n * tread }); Object.assign(d, { n, rise, tread });
+    d.g = x => BASE - Ht + rise * Math.min(n, Math.floor((x - d.x0) / tread) + 1);
   }
 
   function bumps() {
@@ -595,14 +607,14 @@
 
   // A launcher throws wheels up into pop bumpers floating over the track, laid out along the way it'll go:
   // each time it comes down to the bumpers' height (o.h, stepping by o.drop each time), a bumper just behind
-  // and under it knocks it up and on again, at the angle o.ang, so it bounces along in a regular pattern
+  // and under it knocks it on again at the angle o.angs[i]: up and forward, or up and back for the next
+  // one to send it forward again; the last always sends it on its way. So it bounces along in a pattern,
   // and comes down well on its way. They're placed by riding a wheel through just as the ghost will (from
   // where the ghost is now), putting each bumper where it comes down; the ghost then goes exactly the same
-  // way, and the piece is only kept if it bounces off at least two and never back the way it came.
+  // way, and the piece is only kept if it bounces off at least two and gets on down the track.
   function pinfield(o) {
     flat(10);
     launcher(o.via, o.power, 'up');
-    const m = Math.hypot(...o.ang), nx = o.ang[0] / m, ny = o.ang[1] / m;
     const p = push({ type: 'pinfield', len: 600 }); p.g = () => BASE; p.bs = []; p.bx0 = p.x0;
     const t = Object.assign(wheel(0, CRUISE, MAIN_PAL), stateOf(ghost), { main: true, ghost: true }), was = SIM;
     SIM = true;
@@ -614,6 +626,7 @@
       if (t.mode === 'air') up = true; else if (up) break;   // (back down on the track)
       // (coming down properly, so it was clear of the bumper a step before)
       if (t.mode !== 'air' || t.vy < 40 || t.y < BASE - o.h + o.drop * p.bs.length) continue;
+      const ang = o.angs[p.bs.length], m = Math.hypot(...ang), nx = ang[0] / m, ny = ang[1] / m;
       const d = o.r + RW - 0.01, b = { x: t.x - nx * d, y: t.y - ny * d, r: o.r, lit: 0 };
       if (b.y + o.r > BASE - 2 * RW - 3) break;   // (wheels on the track pass under them)
       p.bs.push(b); p.bx0 = Math.min(p.bx0, b.x - o.r); end = b.x;
@@ -635,7 +648,6 @@
         w.x = b.x + nx * (b.r + RW); w.y = b.y + ny * (b.r + RW);
         if (w.vy < 0) w.vy = -vyCap(w, -w.vy);   // never out of the top
         w.hits = (w.hits || 0) + 1;
-        if (w.ghost && w.vx < 20) w.crashed = true;   // (bounced back the way it came: not kept)
         if (!SIM) b.lit = 1;
         emit(b.x + nx * b.r, b.y + ny * b.r, 8, ['#ffe600', '#fff', '#ff3bd0'], 50, 50, 120);
         popup(b.x, b.y - b.r - 4, '+' + pick([250, 500, 1000]), '#ffe600');
@@ -684,9 +696,9 @@
   }
 
   const WEIGHT = { hill: 3, jump: 5, loop: 2, bumps: 2, hazard: 4, flipper: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
-    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5, girders: 1.5, pinfield: 2.5, funnel: 1.2, cones: 1.5, level: 1.2 };
+    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5, girders: 1.5, pinfield: 2.5, funnel: 1.2, cones: 1.5, level: 3, stairs: 1.5 };
   const MAKE = { hill, jump, loop, bumps, hazard, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split,
-    girders, pinfield, funnel, cones, level };
+    girders, pinfield, funnel, cones, level, stairs };
   // pieces that throw wheels into the air get a longer flat after them to land on
   const AIRY = new Set(['jump', 'flipper', 'hazard', 'coaster', 'pinfield', 'funnel', 'girders']);
   // Everything fits within the strip (`rows`), whatever the size of the source; a taller strip than the
@@ -722,7 +734,12 @@
       // a few patterns (how high, stepping down or up or level, and how hard they knock it on), each
       // launched by a spring, a kicker or a pop bumper
       const top = Math.min(44 + (UP >> 1), ROWS - 26), pw = { spring: 230, kicker: 215, bumper: 200 }, via = pick(VIAS);
-      const pat = v => ({ n: ri(3, 5), h: ri(24, top), drop: pick([0, 0, 3, 5, -3]), r: ri(3, 4), ang: pick([[0.15, -0.99], [0.25, -0.97], [0.35, -0.94]]), via: v, power: pw[v], v: ghost.v });
+      const pat = v => {
+        // forward all the way, or back and forth (back off one, forward off the next), ending forward
+        const n = ri(3, 5), fwd = pick([[0.15, -0.99], [0.25, -0.97], [0.35, -0.94]]), back = pick([[-0.3, -0.95], [-0.2, -0.98]]), zig = Math.random() < 0.5;
+        const angs = Array.from({ length: n }, (_, i) => zig && i % 2 === 0 && i < n - 1 ? back : fwd);
+        return { n, h: ri(24, top), drop: pick([0, 0, 3, 5, -3]), r: ri(3, 4), angs, via: v, power: pw[v], v: ghost.v };
+      };
       return [pat(via), pat(via), pat('spring'), pat(via), pat('spring')];
     }
     if (k === 'funnel') {
@@ -730,7 +747,8 @@
       return [{ H, R, lane: 1 }, ...climb({ H, R, lane: 1 }, H), { H: 26, R: 14, lane: 1, belt: true }, { H, R, lane: 0 }];
     }
     if (k === 'cones') return [{ n: ri(3, 6) }];
-    if (k === 'level') { const D = pick([-3, -4, 5, 6, 8, 10]), L = ri(90, 200); return [{ D, L }, ...climb({ D, L }, Math.abs(D)), { D: 5, L: 90, belt: true }]; }
+    if (k === 'stairs') return [{ n: ri(3, 6), rise: ri(3, 5), tread: ri(9, 14) }, { n: 3, rise: 3, tread: 12 }];
+    if (k === 'level') { const D = Math.min(pick([-4, -3, 6, 8, 10, 12, 14]), ROWS - 50), L = ri(90, 220); return [{ D, L }, ...climb({ D, L }, Math.abs(D)), { D: 5, L: 90, belt: true }]; }
     if (k === 'loop') {
       // going round needs about √(5.6·g·r) at the bottom: no pad if it's already going that fast,
       // otherwise start from that and go up
@@ -778,7 +796,7 @@
       if (n > 240 * 20) return false;
       step(w, STEP);
       if (rec && n % 6 === 0) rec.push([w.x, w.y]);
-      if (w.fell || w.stalled || w.crashed || w.y < H - ROWS - 20) return false;   // (or thrown out of the top)
+      if (w.fell || w.stalled || w.crashed || w.y < stripTop() - 20) return false;   // (or thrown out of the top)
     }
     return true;
   }
@@ -923,7 +941,7 @@
 
   // ---------------- physics ----------------
   // never throw a wheel so high it goes off the top of the strip (an upward speed, from where it is now)
-  const vyCap = (w, vy) => Math.min(vy, Math.sqrt(2 * G * Math.max(4, w.y - Math.max(RW + 2, H - ROWS - 16))));
+  const vyCap = (w, vy) => Math.min(vy, Math.sqrt(2 * G * Math.max(4, w.y - Math.max(RW + 2, stripTop() - 16))));
 
   // the source got taller or shorter: the track moves to its new bottom, and everything on it moves along
   function shiftDown(dy) {
@@ -1009,6 +1027,8 @@
       }
       const ng = groundFor(w, w.x);
       if (ng == null) { w.mode = 'air'; w.vx = w.v * cs; w.vy = w.v * sn; return; }
+      // the ground drops away under it (off the edge of a step): it falls
+      if (ng - RW - w.y > 1.5) { w.mode = 'air'; w.vx = w.v * cs; w.vy = 0; w.gvy = null; return; }
       const nvy = (ng - RW - w.y) / dt;
       // ground falling away faster than gravity → catch some air off crests
       if (w.gvy != null && nvy - w.gvy > G * dt && w.v > 60) {
@@ -1122,10 +1142,19 @@
 
   // A chain lift: a dark channel down the middle of the track with the chain creeping up it, yellow
   // anti-rollback dogs clicking along beside it, and a motor housing with a turning gear at the foot.
-  function drawBelt(g, a, b, v, cx, t) {
+  // (or, `steps`, an escalator: steel treads gliding up, under a black rubber handrail on glass)
+  function drawBelt(g, a, b, v, cx, t, steps) {
     for (let wx = Math.ceil(a); wx < b; wx++) {
       const sx = wx - cx; if (sx < -2 || sx > W + 2) continue;
       const y = Math.round(g(wx)), ph = (((wx - t * v) % 4) + 4) % 4;
+      if (steps) {
+        const q = (((wx - t * v * 0.8) % 5) + 5) % 5;
+        px(sx, y, q < 3 ? '#d8d6e4' : '#6a6a80'); px(sx, y - 1, q < 3 ? '#a8a8c0' : q < 4 ? '#e8e6f4' : 'rgba(0,0,0,0)');
+        px(sx, y + 1, '#3a3450');
+        ctx.fillStyle = 'rgba(190,230,255,0.18)'; ctx.fillRect(sx, y - 6, 1, 5);
+        px(sx, y - 7, '#2a2236');
+        continue;
+      }
       px(sx, y, ph < 2 ? '#e8e6f4' : '#3a2c40'); px(sx, y + 1, '#2a1c30');
       if ((((wx - Math.floor(t * v / 8) * 8) % 8) + 8) % 8 === 0) px(sx, y - 1, '#ffd84a');
       // the catwalk's handrail alongside, on posts
@@ -1141,7 +1170,12 @@
     for (const p of pieces) {
       if (p.x1 < cx - 10 || p.x0 > cx + W + 10) continue;
       if (p.type === 'lift') drawBelt(p.g, p.x0, p.x1, p.chain, cx, t);
-      if (p.belts) for (const bt of p.belts) drawBelt(bt.lane == null ? p.g : p.lanes[bt.lane], bt.a, bt.b, bt.v, cx, t);
+      if (p.belts) for (const bt of p.belts) drawBelt(bt.lane == null ? p.g : p.lanes[bt.lane], bt.a, bt.b, bt.v, cx, t, bt.steps);
+      if (p.type === 'stairs') for (let i = 0; i < p.n; i++) {   // each step's nose and riser
+        const x = Math.round(p.x0 + i * p.tread) - cx, y = Math.round(p.g(p.x0 + i * p.tread));
+        ctx.fillStyle = C.dark; ctx.fillRect(x, y - p.rise, 1, p.rise + 3);
+        px(x, y - p.rise, '#fff3c0'); px(x + 1, y, C.top);
+      }
     }
   }
 
@@ -2307,7 +2341,7 @@
     }
     ctx.globalAlpha = 1;
   }
-  // Their light on the ground below the track, the ground in front of the circus, seen from above: each
+  // Their light on the road below the track, the ground in front of the circus, seen from above: each
   // gap between the tents lets out a cone of it, spreading as it comes towards us and thrown off to the
   // side away from the lamp. The lamps and the tents scroll at different speeds, so the cones swing
   // round and stretch as they go by.
@@ -2322,8 +2356,8 @@
         if (g1 - g0 < 3 || Math.abs(c - L) > reach || c < -60 || c > W + 60) continue;
         const fade = Math.min(1, 2.5 * (1 - Math.abs(c - L) / reach)), lean = (c - L) * 0.8;
         for (let row = 0; row < rows; row++) {
-          const f = (row + 1) / rows, half = (g1 - g0) / 2 * (0.8 + 0.9 * f), xc = c + lean * f;
-          ctx.fillStyle = `rgba(255,222,140,${(fade * (0.34 - 0.27 * f)).toFixed(3)})`;
+          const f = (row + 1) / rows, half = (g1 - g0) / 2 * (0.8 + 0.6 * f), xc = c + lean * f;
+          ctx.fillStyle = `rgba(255,222,140,${(fade * (0.2 - 0.15 * f)).toFixed(3)})`;
           ctx.fillRect(Math.round(xc - half), top + row, Math.max(1, Math.round(half * 2)), 1);
         }
       }
@@ -2538,7 +2572,7 @@
       for (let i = ri(1, 4); i > 0; i--)
         FW.shells.push({ x: rnd(W * 0.08, W * 0.92), y: BASE + 2, vy: -rnd(72, 92), fuse: rnd(0.55, 0.85), wait: i * rnd(0.2, 0.45), c: pick(FW_COLS) });
     }
-    const sky = H - ROWS + 6;   // never burst above the top of the strip
+    const sky = stripTop() + 6;   // never burst above the top of the strip
     for (let i = FW.shells.length - 1; i >= 0; i--) {
       const s = FW.shells[i];
       if ((s.wait -= dt) > 0) continue;
@@ -2599,7 +2633,6 @@
       }
       if (L === LAYERS[0]) { ctx.globalAlpha = 1; drawPoles(); }
       if (L === BLOCKS) streetLamps(off);
-      if (L === CIRCUS) groundLight(off);
       if (L === CIRCUS) {
         updateTrain(dt, off);
         for (const q of smoke) { q.x -= 6 * dt; q.y -= 9 * dt; q.r += 1.6 * dt; q.l -= dt; }
@@ -2615,6 +2648,101 @@
       }
     }
     ctx.globalAlpha = 1;
+    drawRoad(dt);                    // (in front of the circus, under the track)
+    groundLight(camX * CIRCUS.par);  // and the street lamps' light on it
+  }
+
+  // ---- the road under the track: a row of parking spaces along the back, some with cars parked in them,
+  // then two lanes of traffic going opposite ways, the far one to the left and the near one to the right,
+  // split by a dashed line: cars, taxis, buses and trucks, their headlights throwing light ahead and their
+  // tail lights glowing red. Each row stands a little in front of the one behind, so they overlap. The track
+  // runs over it all on its posts. Each vehicle is drawn facing right (front on the right) and mirrored:
+  // B body, L its light catching edges, D its dark underside, d a door seam, S a stripe, g glass,
+  // H headlight, T tail light, o tyre, O hubcap, Y taxi sign, K taxi checks, X box, C cab.
+  const VEHICLES = {
+    car:   { n: 5, rows: ['......LLLLLLL.....', '.....BgggggBggggB.', '..BBBBgggggBggggBB', '.LLLLLLLLLLLLLLLLL', 'TBBBBBBBBdBBBBBBBH', 'BBBBBBBBBdBBBBBBBB', 'DDoOOoDDDDDDoOOoDD', '..oooo......oooo..'] },
+    taxi:  { n: 2, body: '#ffd23f', rows: ['........YY........', '......LLLLLLL.....', '.....BgggggBggggB.', '..BBBBgggggBggggBB', '.KKKKKKKKKKKKKKKKK', 'TBBBBBBBBdBBBBBBBH', 'BBBBBBBBBdBBBBBBBB', 'DDoOOoDDDDDDoOOoDD', '..oooo......oooo..'] },
+    bus:   { n: 1, body: ['#ff8a20', '#2f6bff', '#2fd06a', '#e8344e'], rows: ['BBBBBBBBBBBBBBBBBBBBBBBBBBBBB.', 'BLLLLLLLLLLLLLLLLLLLLLLLLLLLL.', 'BggBggBggBggBggBggBggBggBgggg.', 'BggBggBggBggBggBggBggBggBggggB', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS', 'TBBBBBBBBBBBBBBBBBBBBBBBBBBBBH', 'BBBBdBBBBBBBBBBBBBBBBBBBBdBBBB', 'DDoOOoDDDDDDDDDDDDDDDDDDoOOoDD', '..oooo..................oooo..'] },
+    truck: { n: 1.5, rows: ['XXXXXXXXXXXXXXXXXX..........', 'XXXXXXXXXXXXXXXXXX..CCCCC...', 'XXXXXXXXXXXXXXXXXX.CCgggCC..', 'XXXXXXXXXXXXXXXXXX.CCgggCCC.', 'XXXXXXXXXXXXXXXXXXCCCCCCCCCC', 'XXSSSSSSSSSSSSSSXXCCCCCCCCCC', 'TXXXXXXXXXXXXXXXXXCCCCCCCCCH', 'DDDDDDDDDDDDDDDDDDDDDDDDDDDD', 'DDoOOoDoOOoDDDDDDDDDDDoOOoDD', '..oooo.oooo...........oooo..'] },
+  };
+  const CAR_COLS = ['#e8344e', '#2f6bff', '#e8e8f4', '#3a3450', '#22b35e', '#8a5cff', '#c9c8d8', '#ff8a20', '#5a3a5a'];
+  const ROAD = { cars: [], next: [0, 0] };
+  const SPOT = 22;   // parking spaces
+  const rowBottom = row => BASE + [7, 11, 15][row];   // where the wheels sit: the parked row, the far lane, the near lane
+  function pickKind(r) {
+    const kinds = Object.keys(VEHICLES), tot = kinds.reduce((a, k) => a + VEHICLES[k].n, 0);
+    let kind; r *= tot; for (kind of kinds) { r -= VEHICLES[kind].n; if (r <= 0) break; }
+    return kind;
+  }
+  function bodyOf(kind, r) { const V = VEHICLES[kind]; return typeof V.body === 'string' ? V.body : (V.body || CAR_COLS)[Math.floor(r * (V.body || CAR_COLS).length)]; }
+  function newVehicle(lane, x) {
+    const kind = pickKind(Math.random());
+    return { kind, lane, x, w: VEHICLES[kind].rows[0].length, dir: lane ? 1 : -1, v: rnd(22, 46), body: bodyOf(kind, Math.random()), cab: pick(CAR_COLS) };
+  }
+  // one vehicle, its wheels on row `yb`, facing dir; `lights` for one that's driving (dim ones when parked)
+  function drawVehicle(kind, x0, yb, dir, body, cab, dim, lights) {
+    const rows = VEHICLES[kind].rows, w = rows[0].length, y0 = yb - rows.length + 1;
+    rows.forEach((row, j) => { for (let i = 0; i < w; i++) {
+      const ch = row[dir > 0 ? i : w - 1 - i]; if (ch === '.') continue;
+      const col = ch === 'B' ? body : ch === 'L' ? shade(body, 0.35) : ch === 'D' ? shade(body, -0.45) : ch === 'd' ? shade(body, -0.3)
+        : ch === 'S' ? '#fffaf0' : ch === 'g' ? ((i + j) % 4 ? '#6a98c8' : '#b8e0ff') : ch === 'H' ? (lights ? '#fffbe0' : '#a8a8b0')
+        : ch === 'T' ? (lights ? '#ff2a3a' : '#7a2a30') : ch === 'o' ? '#0e0a14' : ch === 'O' ? '#a8a8c0' : ch === 'Y' ? '#fff3a8'
+        : ch === 'K' ? (i & 1 ? '#1a1420' : '#fffaf0') : ch === 'X' ? (j < 1 ? '#f0eef8' : '#d0cedc') : shade(cab, j < 4 ? 0.1 : -0.1);
+      px(x0 + i, y0 + j, dim ? shade(col, -dim) : col);
+    } });
+    if (!lights) return;
+    // the headlights' beam on the road ahead, and a red glow behind the tail lights
+    ctx.globalCompositeOperation = 'lighter';
+    const hx = dir > 0 ? x0 + w : x0 - 1, ly = yb - rows.length + 1 + rows.findIndex(r => r.includes('H'));
+    for (let i = 0; i < 18; i++) {
+      const sp = Math.min(2, i >> 2);
+      ctx.fillStyle = `rgba(255,240,190,${(0.24 * (1 - i / 18)).toFixed(3)})`; ctx.fillRect(hx + dir * i, ly - sp, 1, 1 + 2 * sp);
+    }
+    ctx.fillStyle = 'rgba(255,40,60,0.35)'; ctx.fillRect(dir > 0 ? x0 - 3 : x0 + w, ly, 3, 1);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  function drawRoad(dt) {
+    const top = BASE + 4, cx = camX;
+    // the road (its far side is under the track): the asphalt, the parking spaces' lines, a solid line
+    // along the front of them, and the dashes down the middle
+    ctx.fillStyle = '#1c1826'; ctx.fillRect(0, top - 2, W, H - top + 2);
+    ctx.fillStyle = '#6a6478';
+    for (let k = Math.floor(cx / SPOT); k * SPOT < cx + W + SPOT; k++) ctx.fillRect(Math.round(k * SPOT - cx), top, 1, rowBottom(0) - top + 1);
+    ctx.fillRect(0, rowBottom(0) + 1, W, 1);
+    ctx.fillStyle = '#d8c890';
+    for (let wx = Math.floor(cx / 14) * 14; wx < cx + W + 14; wx += 14) ctx.fillRect(Math.round(wx - cx), rowBottom(1) + 1, 7, 1);
+    // the parked cars, a little dimmer at the back; some spaces empty
+    for (let k = Math.floor((cx - 30) / SPOT); k * SPOT < cx + W + SPOT; k++) {
+      const h = Math.imul(k, 2654435761) >>> 0; if (h % 5 < 2) continue;
+      const kind = (h >>> 8) % 9 === 1 ? 'taxi' : 'car', w = VEHICLES[kind].rows[0].length;
+      const x = Math.round(k * SPOT + (SPOT - w) / 2 - cx);
+      drawVehicle(kind, x, rowBottom(0), (h >>> 12) & 1 ? 1 : -1, bodyOf(kind, ((h >>> 16) % 97) / 97), CAR_COLS[(h >>> 20) % CAR_COLS.length], 0.3, false);
+    }
+    // traffic: new vehicles come on from off the right (the view overtakes even the ones going our way),
+    // each keeping a little way behind the one in front
+    if (!ROAD.seeded && W) {   // (the road starts out with traffic already on it)
+      ROAD.seeded = true;
+      for (const lane of [0, 1]) for (let x = cx - 20; x < cx + W; x += rnd(50, 110)) ROAD.cars.push(newVehicle(lane, x));
+    }
+    for (const lane of [0, 1]) if (simT >= ROAD.next[lane]) { ROAD.cars.push(newVehicle(lane, cx + W + 40)); ROAD.next[lane] = simT + rnd(0.8, 2.6); }
+    for (const c of ROAD.cars) {
+      let v = c.v;
+      for (const o of ROAD.cars) {
+        if (o === c || o.lane !== c.lane) continue;
+        const gap = c.dir > 0 ? o.x - (c.x + c.w) : c.x - (o.x + o.w);
+        if (gap >= 0 && gap < 6) v = Math.min(v, o.v);
+      }
+      c.x += c.dir * v * dt;
+    }
+    for (let i = ROAD.cars.length - 1; i >= 0; i--) {
+      const c = ROAD.cars[i];
+      if (c.x < cx - 80 || c.x > cx + W + 100 || ROAD.cars.some((o, j) => j < i && o.lane === c.lane && Math.abs(o.x - c.x) < Math.max(o.w, c.w) + 3)) ROAD.cars.splice(i, 1);
+    }
+    for (const lane of [0, 1]) for (const c of ROAD.cars) {
+      if (c.lane !== lane) continue;
+      const x0 = Math.round(c.x - cx);
+      if (x0 > -c.w - 16 && x0 < W + 16) drawVehicle(c.kind, x0, rowBottom(lane + 1), c.dir, c.body, c.cab, lane ? 0 : 0.15, true);
+    }
   }
 
   // ---- telephone poles: silhouettes between the skyline and the circus, scrolling at their own pace,
