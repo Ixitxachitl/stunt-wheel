@@ -2344,8 +2344,9 @@
   // Their light on the road below the track, the ground in front of the circus, seen from above: each
   // gap between the tents lets out a cone of it, spreading as it comes towards us and thrown off to the
   // side away from the lamp. The lamps and the tents scroll at different speeds, so the cones swing
-  // round and stretch as they go by.
-  function groundLight(off) {
+  // round and stretch as they go by. Vehicles on the road (`vs`, each with its left edge x0, width w and
+  // wheels' row yb) block it: past each one, the cone is in its shadow, cast away from the lamp.
+  function groundLight(off, vs = []) {
     const loff = camX * BLOCKS.par, items = CIRCUS.items, top = BASE + 4, rows = H - top;
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'lighter';
     for (let k = Math.floor((loff - 60) / STREET.gap); lampX(k) < loff + W + 60; k++) {
@@ -2356,9 +2357,16 @@
         if (g1 - g0 < 3 || Math.abs(c - L) > reach || c < -60 || c > W + 60) continue;
         const fade = Math.min(1, 2.5 * (1 - Math.abs(c - L) / reach)), lean = (c - L) * 0.8;
         for (let row = 0; row < rows; row++) {
-          const f = (row + 1) / rows, half = (g1 - g0) / 2 * (0.8 + 0.6 * f), xc = c + lean * f;
+          const f = (row + 1) / rows, half = (g1 - g0) / 2 * (0.8 + 0.6 * f), xc = c + lean * f, y = top + row;
           ctx.fillStyle = `rgba(255,222,140,${(fade * (0.2 - 0.15 * f)).toFixed(3)})`;
-          ctx.fillRect(Math.round(xc - half), top + row, Math.max(1, Math.round(half * 2)), 1);
+          // the lit stretch of this row, less the shadows of whatever's between it and the lamp
+          let segs = [[Math.round(xc - half), Math.round(xc + half)]];
+          for (const v of vs) {
+            if (v.yb >= y) continue;
+            const dx = lean * (y - v.yb) / rows, a = v.x0 + dx - 1, b = v.x0 + v.w + dx + 1;
+            segs = segs.flatMap(([s0, s1]) => b <= s0 || a >= s1 ? [[s0, s1]] : [[s0, Math.round(a)], [Math.round(b), s1]].filter(([p, q]) => q > p));
+          }
+          for (const [s0, s1] of segs) ctx.fillRect(s0, y, s1 - s0, 1);
         }
       }
     }
@@ -2648,8 +2656,7 @@
       }
     }
     ctx.globalAlpha = 1;
-    drawRoad(dt);                    // (in front of the circus, under the track)
-    groundLight(camX * CIRCUS.par);  // and the street lamps' light on it
+    drawRoad(dt);   // (in front of the circus, under the track)
   }
 
   // ---- the road under the track: a row of parking spaces along the back, some with cars parked in them,
@@ -2712,11 +2719,12 @@
     ctx.fillStyle = '#d8c890';
     for (let wx = Math.floor(cx / 14) * 14; wx < cx + W + 14; wx += 14) ctx.fillRect(Math.round(wx - cx), rowBottom(1) + 1, 7, 1);
     // the parked cars, a little dimmer at the back; some spaces empty
+    const vs = [];
     for (let k = Math.floor((cx - 30) / SPOT); k * SPOT < cx + W + SPOT; k++) {
       const h = Math.imul(k, 2654435761) >>> 0; if (h % 5 < 2) continue;
       const kind = (h >>> 8) % 9 === 1 ? 'taxi' : 'car', w = VEHICLES[kind].rows[0].length;
-      const x = Math.round(k * SPOT + (SPOT - w) / 2 - cx);
-      drawVehicle(kind, x, rowBottom(0), (h >>> 12) & 1 ? 1 : -1, bodyOf(kind, ((h >>> 16) % 97) / 97), CAR_COLS[(h >>> 20) % CAR_COLS.length], 0.3, false);
+      vs.push({ kind, x0: Math.round(k * SPOT + (SPOT - w) / 2 - cx), w, yb: rowBottom(0), dir: (h >>> 12) & 1 ? 1 : -1,
+        body: bodyOf(kind, ((h >>> 16) % 97) / 97), cab: CAR_COLS[(h >>> 20) % CAR_COLS.length], dim: 0.3, lights: false });
     }
     // traffic: new vehicles come on from off the right (the view overtakes even the ones going our way),
     // each keeping a little way behind the one in front
@@ -2741,8 +2749,10 @@
     for (const lane of [0, 1]) for (const c of ROAD.cars) {
       if (c.lane !== lane) continue;
       const x0 = Math.round(c.x - cx);
-      if (x0 > -c.w - 16 && x0 < W + 16) drawVehicle(c.kind, x0, rowBottom(lane + 1), c.dir, c.body, c.cab, lane ? 0 : 0.15, true);
+      if (x0 > -c.w - 16 && x0 < W + 16) vs.push({ kind: c.kind, x0, w: c.w, yb: rowBottom(lane + 1), dir: c.dir, body: c.body, cab: c.cab, dim: lane ? 0 : 0.15, lights: true });
     }
+    groundLight(camX * CIRCUS.par, vs);   // the street lamps' light on the road, blocked by the vehicles
+    for (const v of vs) drawVehicle(v.kind, v.x0, v.yb, v.dir, v.body, v.cab, v.dim, v.lights);
   }
 
   // ---- telephone poles: silhouettes between the skyline and the circus, scrolling at their own pace,
