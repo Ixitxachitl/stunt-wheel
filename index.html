@@ -229,11 +229,12 @@
   const cvs = document.getElementById('c');
   let ctx = cvs.getContext('2d');   // (bake() points it at an offscreen canvas for a moment)
   const rowsFor = () => Math.max(ROWS, Math.ceil(innerHeight / SCALE));
-  let W = 0, H = rowsFor(), BASE = H - 8, ready = false;
+  const FLOOR = 14;   // the ground below the track (where the street lamps' light falls)
+  let W = 0, H = rowsFor(), BASE = H - FLOOR, ready = false;
   function resize() {
     W = Math.ceil(innerWidth / SCALE);
     const nh = rowsFor();
-    if (nh !== H) { const dy = nh - H; H = nh; BASE = H - 8; if (ready) shiftDown(dy); }
+    if (nh !== H) { const dy = nh - H; H = nh; BASE = H - FLOOR; if (ready) shiftDown(dy); }
     cvs.width = W; cvs.height = H;
     cvs.style.width = W * SCALE + 'px'; cvs.style.height = H * SCALE + 'px';
     ctx.imageSmoothingEnabled = false;
@@ -291,6 +292,7 @@
 
   // (with o.belt, a chain lift up its near side, for when it's too steep to coast up)
   function hill(o) {
+    if (o.power) boost(o.power);
     const { A, L } = o;
     const p = push({ type: 'hill', len: L });
     p.g = x => BASE - A * (1 - Math.cos(2 * Math.PI * (x - p.x0) / L)) / 2;
@@ -299,6 +301,7 @@
 
   // The base of the track itself rises a few pixels (on scaffolding) or sinks a little for a stretch.
   function level(o) {
+    if (o.power) boost(o.power);
     const r = 30, p = push({ type: 'level', len: o.L + 2 * r });
     p.g = x => { const u = x - p.x0; return BASE - o.D * smooth(clamp(Math.min(u, p.len - u) / r, 0, 1)); };
     if (o.belt) p.belts = [o.D > 0 ? { a: p.x0, b: p.x0 + r, v: CHAIN } : { a: p.x1 - r, b: p.x1, v: CHAIN }];
@@ -320,19 +323,34 @@
       emit(w.x, w.y + 2, 10, [C.boostA, C.boostB, '#fff'], 50, 40, 100); };
   }
 
-  // A spring pad, always just before a die or a chip stack (p.hazard): it throws a wheel up at `power`.
+  // ---- launchers ----
+  // Everything that throws a wheel into the air throws it over or into something: across a gap, over a
+  // die or a chip stack, or up into the floating bumpers. A ramp or a flipper only ever goes at a gap; a
+  // spring, a pinball slingshot kicker or a pop bumper (launcher()) can go at any of them. Each one's
+  // launch point is `lx`. Chat wheels are steered, at speeds of their own, so a launcher with `to` set gives
+  // them the speed to get past it.
+  const VIAS = ['spring', 'kicker', 'bumper'];
+  const aimed = (w, p, vx, vy) => w.main || p.to == null ? vx : Math.max(vx, (p.to - w.x) * G / (2 * Math.max(1, vy)));
+  function launcher(via, power, dir) {
+    if (via === 'kicker') return kicker({ dir, power });
+    if (via === 'bumper') return popBumper(power);
+    return spring(power);
+  }
+
+  // A spring pad: it throws a wheel up at `power` (over a die or a chip stack, p.hazard, or anything else).
   function spring(power) {
     const p = push({ type: 'spring', len: 14 });
-    p.g = () => BASE; p.pa = p.x0 + 2; p.pb = p.x0 + 12; p.trig = p.x0 + 7; p.spring = 0;
+    p.g = () => BASE; p.pa = p.x0 + 2; p.pb = p.x0 + 12; p.trig = p.lx = p.x0 + 7; p.spring = 0;
     p.onTrig = w => {
       let vy = power;
-      if (!w.main) {
+      if (!w.main && p.hazard) {
         // a chat wheel on its way in or out sometimes misses the spring and rolls into the die...
         if (w.phase !== 'talk' && Math.random() < CRASH[w.phase]) { w.doomed = p.hazard; return; }
         // ...otherwise it goes at its own speed, so it's thrown high enough to peak over the die
         vy = Math.max(power, G * (p.hazard.hx - w.x) / Math.max(30, w.v));
       }
-      w.mode = 'air'; w.vx = w.v; w.vy = -vyCap(w, vy); w.gvy = null;
+      vy = vyCap(w, vy);
+      w.mode = 'air'; w.vx = aimed(w, p, w.v, vy); w.vy = -vy; w.gvy = null;
       if (!SIM) p.spring = 1;
       emit(w.x, w.y + RW, 14, ['#ffef5a', '#fff', C.pad], 45, 70, 150, [0.4, 0.9]);
     };
@@ -341,6 +359,14 @@
 
   function jump(o) {
     if (o.power) boost(o.power);
+    if (o.via) {   // a spring, kicker or pop bumper at the edge, instead of a ramp, and a level landing
+      flat(8);
+      const L = launcher(o.via, o.lp, 'long');
+      const gp = push({ type: 'gap', len: o.gap }); gp.g = () => null;
+      const l = push({ type: 'land', len: o.ll }); l.g = () => BASE;
+      L.to = gp.x1 + 6;
+      return;
+    }
     const { Hr, rl, gap, ll } = o, Hl = Math.round(Hr * 0.6);
     const r = push({ type: 'ramp', len: rl });
     r.g = x => { const t = (x - r.x0) / rl; return BASE - Hr * t * t; };
@@ -371,23 +397,25 @@
   const CHIP_COLS = [['#e8344e', '#a3203a'], ['#2f6bff', '#1d43a8'], ['#22b35e', '#147a3e'], ['#8a5cff', '#5a3aad'], ['#3a3450', '#1f1a2e']];
   function hazard(o) {
     flat(16);
-    const s = spring(o.power);
-    const p = push({ type: 'hazard', len: s.trig + o.dist + 30 - s.x1 }); p.g = () => BASE;
-    Object.assign(p, o.look, { hx: s.trig + o.dist });
-    s.hazard = p;
+    const s = launcher(o.via, o.power, o.dir);
+    const p = push({ type: 'hazard', len: Math.max(20, s.lx + o.dist + 30 - s.x1) }); p.g = () => BASE;
+    Object.assign(p, o.look, { hx: Math.max(s.lx + o.dist, s.x1 + o.look.hw) });
+    if (s.type === 'spring') s.hazard = p; else s.to = p.hx + p.hw / 2 + RW + 4;
   }
 
-  // A pinball pop bumper: anything that rolls into it gets kicked up into the air.
-  function bumper() {
-    const p = push({ type: 'bumper', len: ri(60, 80) }); p.g = () => BASE;
-    p.bx = p.x0 + 30; p.lit = 0; p.kick = rnd(120, 150);
-    p.touch = p.bx - 4 - RW;
+  // A pinball pop bumper: a wheel that rolls into it gets kicked up into the air.
+  function popBumper(power) {
+    const p = push({ type: 'bumper', len: 34 }); p.g = () => BASE;
+    p.bx = p.x0 + 26; p.lit = 0; p.kick = power;
+    p.touch = p.lx = p.bx - 4 - RW;
     p.onTouch = w => {
       if (!SIM) p.lit = 1;
-      w.mode = 'air'; w.vx = clamp(w.v, 70, 110); w.vy = -vyCap(w, p.kick); w.gvy = null;
+      const vy = vyCap(w, p.kick);
+      w.mode = 'air'; w.vx = aimed(w, p, clamp(w.v, 70, 110), vy); w.vy = -vy; w.gvy = null;
       emit(p.bx, BASE - 5, 12, ['#ffe600', '#fff', '#ff3b5c'], 60, 60, 120);
       popup(p.bx, BASE - 14, '+' + pick([100, 250, 500]), '#ffe600');
     };
+    return p;
   }
 
   // Three drop targets in a row that wheels knock flat; they pop back up a few seconds later.
@@ -489,12 +517,14 @@
   // stays down while the other climbs onto an upper deck and comes back down to join it. The streamer's
   // wheel's lane is picked here, so the ghost rides the same one.
   function braid(o) {
+    if (o.power) boost(o.power);
     const { L, A } = o, p = push({ type: 'braid', len: L }), s = x => (x - p.x0) / L;
     p.lanes = [x => BASE - A * Math.sin(Math.PI * s(x)) ** 2, x => BASE - A * 0.55 * Math.sin(2 * Math.PI * s(x)) ** 2];
     p.g = p.lanes[0]; p.mainLane = o.lane; p.frontLane = 1;
     if (o.belt) p.belts = [{ a: p.x0, b: p.x0 + L / 2, v: CHAIN, lane: 0 }, { a: p.x0, b: p.x0 + L / 4, v: CHAIN, lane: 1 }, { a: p.x0 + L / 2, b: p.x0 + L * 3 / 4, v: CHAIN, lane: 1 }];
   }
   function split(o) {
+    if (o.power) boost(o.power);
     const { A } = o, up = rampFor(A), L = o.L + 2 * (up - 36), p = push({ type: 'split', len: L });
     p.lanes = [() => BASE, x => { const u = x - p.x0; return BASE - A * smooth(clamp(Math.min(u, L - u) / up, 0, 1)); }];
     p.g = p.lanes[0]; p.mainLane = o.lane; p.ramp = up; p.A = A;   // (its deck hangs from a suspension bridge)
@@ -521,6 +551,7 @@
   // and gaining more downhill.
   const TIER = 11, TILT = 4;
   function girders(o) {
+    if (o.power) boost(o.power);
     const { w } = o, H = 2 * TIER + TILT + 13, p = deck('girders', H, w, 24), top = p.top, xe = p.xe, xl = xe - w + 2;
     p.mainLane = o.lane;
     if (o.belt) p.belts = [{ a: p.x0, b: p.xs, v: CHAIN, lane: 1 }];
@@ -546,36 +577,54 @@
     p.trig = xe; p.onTrig = wh => { if (laneOf(wh, p) === 1) { wh.mode = 'path'; wh.path = p; wh.s = 0; wh.v = Math.max(45, wh.v); } };
   }
 
-  // A pinball slingshot kicker: hit it and it fires the wheel off at its angle: straight up, long and
-  // low, or back over its shoulder (it lands behind and rolls on).
-  const KICKS = { up: [0.5, 215], long: [1.35, 120], back: [-0.5, 200] };
+  // A pinball slingshot kicker: hit it and it fires the wheel off at its angle, straight up or long and low
+  // (o.power, if given, instead of its usual upward kick).
+  const KICKS = { up: [0.5, 215], long: [1.35, 120] };
   function kicker(o) {
-    const p = push({ type: 'kicker', len: 50 }); p.g = () => BASE;
-    p.kx = p.x0 + 18; p.trig = p.kx - 2; p.dir = o.dir; p.lit = 0;
+    const p = push({ type: 'kicker', len: 26 }); p.g = () => BASE;
+    p.kx = p.x0 + 18; p.trig = p.lx = p.kx - 2; p.dir = o.dir; p.lit = 0;
     p.onTrig = w => {
-      const [fx, vy] = KICKS[p.dir];
-      w.mode = 'air'; w.vx = fx > 0 ? w.v * fx : Math.min(-40, w.v * fx); w.vy = -vyCap(w, vy); w.gvy = null;
+      const [fx, ky] = KICKS[p.dir], vy = vyCap(w, o.power ?? ky);
+      w.mode = 'air'; w.vx = aimed(w, p, w.v * fx, vy); w.vy = -vy; w.gvy = null;
       if (!SIM) p.lit = 1;
       emit(p.kx, BASE - 3, 10, ['#ffe600', '#fff', '#3ff8ff'], 50, 60, 150);
       popup(p.kx, BASE - 12, '+' + pick([100, 200]), '#3ff8ff');
     };
+    return p;
   }
 
-  // A spring that launches wheels up into a cluster of pop bumpers floating over the track; they
-  // ricochet off them (see bounceOff) before coming down.
+  // A launcher throws wheels up into pop bumpers floating over the track, laid out along the way it'll go:
+  // each time it comes down to the bumpers' height (o.h, stepping by o.drop each time), a bumper just behind
+  // and under it knocks it up and on again, at the angle o.ang, so it bounces along in a regular pattern
+  // and comes down well on its way. They're placed by riding a wheel through just as the ghost will (from
+  // where the ghost is now), putting each bumper where it comes down; the ghost then goes exactly the same
+  // way, and the piece is only kept if it bounces off at least two and never back the way it came.
   function pinfield(o) {
-    const p = push({ type: 'pinfield', len: o.len }); p.g = () => BASE;
-    p.sx = p.x0 + 12; p.trig = p.sx;
-    p.bs = o.bs.map(([dx, h, r]) => ({ x: p.x0 + dx, y: BASE - h, r, lit: 0 }));
-    p.onTrig = w => {
-      w.mode = 'air'; w.vx = Math.max(w.v, 70); w.vy = -vyCap(w, 230); w.gvy = null;
-      if (!SIM) p.spring = 1;
-      emit(p.sx, BASE - 2, 12, ['#ffef5a', '#fff', C.pad], 45, 70, 150);
-    };
+    flat(10);
+    launcher(o.via, o.power, 'up');
+    const m = Math.hypot(...o.ang), nx = o.ang[0] / m, ny = o.ang[1] / m;
+    const p = push({ type: 'pinfield', len: 600 }); p.g = () => BASE; p.bs = []; p.bx0 = p.x0;
+    const t = Object.assign(wheel(0, CRUISE, MAIN_PAL), stateOf(ghost), { main: true, ghost: true }), was = SIM;
+    SIM = true;
+    let up = false, end = p.x0;
+    for (let n = 0; n < 240 * 8 && p.bs.length < o.n; n++) {
+      const x0 = t.x;
+      step(t, STEP);
+      if (t.fell || t.crashed || t.stalled) break;
+      if (t.mode === 'air') up = true; else if (up) break;   // (back down on the track)
+      // (coming down properly, so it was clear of the bumper a step before)
+      if (t.mode !== 'air' || t.vy < 40 || t.y < BASE - o.h + o.drop * p.bs.length) continue;
+      const d = o.r + RW - 0.01, b = { x: t.x - nx * d, y: t.y - ny * d, r: o.r, lit: 0 };
+      if (b.y + o.r > BASE - 2 * RW - 3) break;   // (wheels on the track pass under them)
+      p.bs.push(b); p.bx0 = Math.min(p.bx0, b.x - o.r); end = b.x;
+      bounceOff(t, x0);   // it bounces off it right here, just as the ghost will
+    }
+    SIM = was;
+    p.len = Math.max(30, Math.round(end - p.x0 + 40)); p.x1 = p.x0 + p.len; genX = p.x1;
   }
   function bounceOff(w, x0) {
     for (const p of pieces) {
-      if (!p.bs || p.type !== 'pinfield' || p.x1 < x0 - 10 || p.x0 > w.x + 10) continue;
+      if (!p.bs || p.type !== 'pinfield' || p.x1 < x0 - 10 || p.bx0 > w.x + 10) continue;
       for (const b of p.bs) {
         const dx = w.x - b.x, dy = w.y - b.y, d = Math.hypot(dx, dy);
         if (d >= b.r + RW || d === 0) continue;
@@ -585,6 +634,8 @@
         const sp = Math.hypot(w.vx, w.vy), k = Math.min(1.12, 260 / Math.max(1, sp)); w.vx *= k; w.vy *= k;
         w.x = b.x + nx * (b.r + RW); w.y = b.y + ny * (b.r + RW);
         if (w.vy < 0) w.vy = -vyCap(w, -w.vy);   // never out of the top
+        w.hits = (w.hits || 0) + 1;
+        if (w.ghost && w.vx < 20) w.crashed = true;   // (bounced back the way it came: not kept)
         if (!SIM) b.lit = 1;
         emit(b.x + nx * b.r, b.y + ny * b.r, 8, ['#ffe600', '#fff', '#ff3bd0'], 50, 50, 120);
         popup(b.x, b.y - b.r - 4, '+' + pick([250, 500, 1000]), '#ffe600');
@@ -599,6 +650,7 @@
   // the height of the funnel's middle k of the way down: its back rim is level with the deck
   const funnelY = (p, k) => p.top + 0.3 * p.R + k * (p.H - 0.3 * p.R);
   function funnel(o) {
+    if (o.power) boost(o.power);
     const { H, R } = o, p = deck('funnel', H, 24 + R, R + 30);
     p.mainLane = o.lane; p.fx = p.xe; p.R = R; p.H = H;
     if (o.belt) p.belts = [{ a: p.x0, b: p.xs, v: CHAIN, lane: 1 }];
@@ -631,12 +683,12 @@
     return !p ? BASE : p.lanes ? p.lanes[laneOf(w, p)](x) : p.g(x);
   }
 
-  const WEIGHT = { hill: 3, jump: 4, loop: 2, bumps: 2, hazard: 3, bumper: 2, flipper: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
-    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5, girders: 1.5, kicker: 2, pinfield: 1.5, funnel: 1.2, cones: 1.5, level: 1.2 };
-  const MAKE = { hill, jump, loop, bumps, hazard, bumper, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split,
-    girders, kicker, pinfield, funnel, cones, level };
+  const WEIGHT = { hill: 3, jump: 5, loop: 2, bumps: 2, hazard: 4, flipper: 2, targets: 1.5, coaster: 2.5, dominoes: 1.5,
+    arch: 1.5, tunnel: 2.5, pipe: 1.5, braid: 1.5, split: 1.5, girders: 1.5, pinfield: 2.5, funnel: 1.2, cones: 1.5, level: 1.2 };
+  const MAKE = { hill, jump, loop, bumps, hazard, flipper, targets, coaster, dominoes, arch, tunnel, pipe, braid, split,
+    girders, pinfield, funnel, cones, level };
   // pieces that throw wheels into the air get a longer flat after them to land on
-  const AIRY = new Set(['jump', 'bumper', 'flipper', 'hazard', 'coaster', 'kicker', 'pinfield', 'funnel', 'girders']);
+  const AIRY = new Set(['jump', 'flipper', 'hazard', 'coaster', 'pinfield', 'funnel', 'girders']);
   // Everything fits within the strip (`rows`), whatever the size of the source; a taller strip than the
   // default lets loops, coasters, decks and bumpers go higher (UP is how much taller it is).
   const UP = Math.max(0, ROWS - 72);
@@ -645,29 +697,40 @@
   // The ways to build each kind of piece, the most natural first. The first one the ghost gets through
   // is kept, so a boost pad only turns up when the jump or loop really needs one, and only as strong as
   // it needs to be.
+  // The ways up a climb of h px: a chain lift, or (now and then first) a boost pad before it, as strong as
+  // coasting up h takes, or a bit more.
+  function climb(o, h) {
+    const need = Math.min(200, Math.ceil(Math.sqrt(2 * 0.7 * G * h) / 10) * 10 + 20);
+    const belt = { ...o, belt: true }, pads = [{ ...o, power: need }, { ...o, power: Math.min(200, need + 30) }];
+    return Math.random() < 0.35 ? [...pads, belt] : [belt, ...pads];
+  }
   function options(k) {
     if (k === 'jump') {
       const base = { Hr: ri(8, 15), rl: ri(22, 30), gap: ri(22, 60), ll: ri(26, 36) };
-      return [base, ...[130, 160, 190].map(power => ({ ...base, power })), { ...base, gap: 22, power: 200 }];
+      const ramp = [base, ...[130, 160, 190].map(power => ({ ...base, power })), { ...base, gap: 22, power: 200 }];
+      // or now and then a spring, a kicker or a pop bumper at the edge of the gap instead of a ramp
+      const via = pick(['ramp', 'ramp', ...VIAS]), lps = { spring: [190, 220], kicker: [120, 150], bumper: [150, 180] };
+      return via === 'ramp' ? ramp : [...lps[via].flatMap(lp => [{ ...base, via, lp }, { ...base, via, lp, power: 150 }]), ...ramp];
     }
     if (k === 'flipper') {
       const gap = ri(30, 60);
       return [{ gap }, { gap, power: 140 }, { gap, power: 180 }, { gap: 26 }];
     }
-    if (k === 'hill') { const A = rnd(5, 13 + UP / 6), L = ri(50, 90); return [{ A, L }, { A: Math.min(A, 8), L }, { A, L, belt: true }]; }
-    if (k === 'girders') { const w = ri(50, 70); return [{ w, lane: 1 }, { w, lane: 1, belt: true }, { w, lane: 0 }]; }
-    if (k === 'kicker') { const dir = pick(Object.keys(KICKS)); return [{ dir }, { dir: 'up' }, { dir: 'long' }]; }
+    if (k === 'hill') { const A = rnd(5, 13 + UP / 6), L = ri(50, 90); return [{ A, L }, { A: Math.min(A, 8), L }, ...climb({ A, L }, A)]; }
+    if (k === 'girders') { const w = ri(50, 70); return [{ w, lane: 1 }, ...climb({ w, lane: 1 }, 2 * TIER + TILT + 13), { w, lane: 0 }]; }
     if (k === 'pinfield') {
-      // a few layouts of 3 or 4 bumpers floating where the spring throws the wheel
-      const layout = () => Array.from({ length: ri(3, 4) }, (_, i) => [34 + i * 13 + ri(-3, 3), ri(24, Math.min(44 + (UP >> 1), ROWS - 26)), ri(3, 4)]);
-      return [{ len: 110, bs: layout() }, { len: 110, bs: layout() }, { len: 110, bs: layout() }];
+      // a few patterns (how high, stepping down or up or level, and how hard they knock it on), each
+      // launched by a spring, a kicker or a pop bumper
+      const top = Math.min(44 + (UP >> 1), ROWS - 26), pw = { spring: 230, kicker: 215, bumper: 200 }, via = pick(VIAS);
+      const pat = v => ({ n: ri(3, 5), h: ri(24, top), drop: pick([0, 0, 3, 5, -3]), r: ri(3, 4), ang: pick([[0.15, -0.99], [0.25, -0.97], [0.35, -0.94]]), via: v, power: pw[v], v: ghost.v });
+      return [pat(via), pat(via), pat('spring'), pat(via), pat('spring')];
     }
     if (k === 'funnel') {
       const H = ri(26, Math.max(26, Math.min(36 + Math.floor(UP / 3), ROWS - 30))), R = ri(14, 18);
-      return [{ H, R, lane: 1 }, { H, R, lane: 1, belt: true }, { H: 26, R: 14, lane: 1, belt: true }, { H, R, lane: 0 }];
+      return [{ H, R, lane: 1 }, ...climb({ H, R, lane: 1 }, H), { H: 26, R: 14, lane: 1, belt: true }, { H, R, lane: 0 }];
     }
     if (k === 'cones') return [{ n: ri(3, 6) }];
-    if (k === 'level') { const D = pick([-3, -4, 5, 6, 8, 10]), L = ri(90, 200); return [{ D, L }, { D, L, belt: true }, { D: 5, L: 90, belt: true }]; }
+    if (k === 'level') { const D = pick([-3, -4, 5, 6, 8, 10]), L = ri(90, 200); return [{ D, L }, ...climb({ D, L }, Math.abs(D)), { D: 5, L: 90, belt: true }]; }
     if (k === 'loop') {
       // going round needs about √(5.6·g·r) at the bottom: no pad if it's already going that fast,
       // otherwise start from that and go up
@@ -677,7 +740,7 @@
     if (k === 'braid' || k === 'split') {
       // the streamer's wheel takes either lane, whichever the ghost gets along
       const L = ri(150, 200), A = ri(14, Math.max(14, Math.min(24 + Math.floor(UP / 3), ROWS - 40))), lane = ri(0, 1);
-      return [{ L, A, lane }, { L, A, lane, belt: true }, { L, A, lane: 1 - lane }, { L, A, lane: 1 - lane, belt: true }, { L, A: 12, lane: 0, belt: true }];
+      return [{ L, A, lane }, ...climb({ L, A, lane }, A), { L, A, lane: 1 - lane }, ...climb({ L, A, lane: 1 - lane }, A), { L, A: 12, lane: 0, belt: true }];
     }
     if (k === 'coaster') {
       // as high as fits in the strip, with a loop at the bottom of the drop when the drop is fast enough
@@ -688,9 +751,14 @@
       const die = Math.random() < 0.5, n = ri(3, 5);
       const look = die ? { kind: 'die', hw: 7, hh: 7, face: ri(1, 6) }
         : { kind: 'chips', hw: 8, hh: n * 2 + 1, n, cols: Array.from({ length: n }, () => pick(CHIP_COLS)) };
-      // spring hard enough to rise well above it, set back so the arc peaks over it at the ghost's speed
-      const power = Math.sqrt(2 * G * (look.hh + 9)), at = (vy, f = 1) => Math.round(ghost.v * vy / G * f);
-      return [1, 0.85, 1.15].map(f => ({ look, power, dist: at(power, f) })).concat({ look, power: power + 30, dist: at(power + 30) });
+      // thrown hard enough to rise well above it, from far enough back that the arc peaks over it at the
+      // ghost's speed: by a spring, or a kicker, or a pop bumper
+      const power = Math.sqrt(2 * G * (look.hh + 9)), at = (vx, vy, f = 1) => Math.round(vx * vy / G * f), F = [1, 0.85, 1.15];
+      const spring = F.map(f => ({ look, via: 'spring', power, dist: at(ghost.v, power, f) })).concat({ look, via: 'spring', power: power + 30, dist: at(ghost.v, power + 30) });
+      const kick = ['up', 'long'].flatMap(dir => { const vy = Math.max(KICKS[dir][1], power); return F.map(f => ({ look, via: 'kicker', dir, power: vy, dist: at(ghost.v * KICKS[dir][0], vy, f) })); });
+      const bump = F.map(f => ({ look, via: 'bumper', power: power + 20, dist: at(clamp(ghost.v, 70, 110), power + 20, f) }));
+      const via = pick(VIAS);
+      return via === 'kicker' ? [...kick, ...spring] : via === 'bumper' ? [...bump, ...spring] : [...spring, ...kick, ...bump];
     }
     return [{}];
   }
@@ -726,7 +794,9 @@
     const nr = ruins.length;
     if (RUINABLE.has(k) && Math.random() < 0.18) addRuin(pieces[n].x0, genX);   // (sometimes old track over it)
     const rec = Math.random() < 0.22 ? [] : null;   // (sometimes the ghost's way through gets coins along it)
+    ghost.hits = 0;
     let ok = (k === 'pinfield' || (ride(twin(0.95)) && ride(twin(1.05)))) && ride(ghost, rec);
+    if (ok && k === 'pinfield') { const pf = pieces.slice(n).find(q => q.bs); ok = pf.bs.length >= 2 && ghost.hits >= 2; }
     // and the next piece only starts once it's back on solid track
     while (ok && ghost.mode !== 'ground') { flat(10); ok = ride(ghost); }
     SIM = false;
@@ -782,7 +852,7 @@
   // onto it, but a wheel that comes down on it rolls along it and drops off the end, and one that comes up
   // under it bounces off it. One or two stretches with a gap between, rusted, with a drooping broken end.
   const ruins = [];
-  const RUINABLE = new Set(['hill', 'bumps', 'level', 'jump', 'kicker', 'bumper', 'hazard', 'cones', 'dominoes', 'targets', 'flipper']);
+  const RUINABLE = new Set(['hill', 'bumps', 'level', 'jump', 'hazard', 'cones', 'dominoes', 'targets', 'flipper']);
   function addRuin(x0, x1) {
     const span = x1 - x0; if (span < 50) return;
     const len = ri(34, Math.min(80, span - 10)), xa = Math.round(x0 + rnd(5, span - len - 5)), xb = xa + len;
@@ -1147,11 +1217,7 @@
         ctx.fillStyle = '#c9c8d8'; ctx.fillRect(kx - 4, BASE - 1, 9, 1);
         px(tip[0], tip[1], '#3ff8ff');
       } else if (p.type === 'pinfield') {
-        // its spring, and the bumpers floating above it
-        const sx = p.sx - cx, e = Math.round((p.spring || 0) * 6);
-        ctx.fillStyle = C.padDark; ctx.fillRect(sx - 4, BASE - 1, 9, 1);
-        for (let i = 0; i < e; i++) px(sx - 2 + (i & 1) * 4, BASE - 2 - i, C.coil);
-        ctx.fillStyle = C.pad; ctx.fillRect(sx - 4, BASE - 3 - e, 9, 1);
+        // the bumpers floating over the track
         for (const b of p.bs) {
           const bx = Math.round(b.x - cx), by = Math.round(b.y), lit = b.lit > 0;
           for (let dy = -b.r - 1; dy <= b.r + 1; dy++) for (let dx = -b.r - 1; dx <= b.r + 1; dx++) {
@@ -2241,24 +2307,24 @@
     }
     ctx.globalAlpha = 1;
   }
-  // Their light on the ground in front of the circus, between the tents: each gap the light gets through
-  // throws a patch out onto the ground, further along the further it is from the lamp. The lamps and the
-  // tents scroll at different speeds, so the patches slide and stretch as they go by.
+  // Their light on the ground below the track, the ground in front of the circus, seen from above: each
+  // gap between the tents lets out a cone of it, spreading as it comes towards us and thrown off to the
+  // side away from the lamp. The lamps and the tents scroll at different speeds, so the cones swing
+  // round and stretch as they go by.
   function groundLight(off) {
-    const loff = camX * BLOCKS.par, items = CIRCUS.items, spread = 0.7;
+    const loff = camX * BLOCKS.par, items = CIRCUS.items, top = BASE + 4, rows = H - top;
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'lighter';
     for (let k = Math.floor((loff - 60) / STREET.gap); lampX(k) < loff + W + 60; k++) {
       const L = lampX(k) - loff + 2;
       for (let i = 0; i + 1 < items.length; i++) {
-        const g0 = items[i].x + items[i].w - off, g1 = items[i + 1].x - off;
-        // (only from the lamps either side of it, so patches don't pile up into one glow)
-        if (g1 - g0 < 2 || Math.abs((g0 + g1) / 2 - L) > STREET.gap) continue;
-        const a0 = g0 + (g0 - L) * spread, a1 = g1 + (g1 - L) * spread, fade = 1 - Math.abs((g0 + g1) / 2 - L) / STREET.gap;
-        if (a1 < -4 || a0 > W + 4) continue;
-        for (let row = 0; row < 5; row++) {   // brighter towards the front
-          ctx.fillStyle = `rgba(255,214,150,${(fade * (0.05 + 0.06 * row)).toFixed(3)})`;
-          const sk = (4 - row) * 0.15;   // a little narrower at the back
-          ctx.fillRect(Math.round(a0 + (a1 - a0) * sk / 2), BASE - 5 + row, Math.max(1, Math.round((a1 - a0) * (1 - sk))), 1);
+        // (only from the nearest lamp, fading out as the next one takes over, so the cones stay apart)
+        const g0 = items[i].x + items[i].w - off, g1 = items[i + 1].x - off, c = (g0 + g1) / 2, reach = STREET.gap * 0.6;
+        if (g1 - g0 < 3 || Math.abs(c - L) > reach || c < -60 || c > W + 60) continue;
+        const fade = Math.min(1, 2.5 * (1 - Math.abs(c - L) / reach)), lean = (c - L) * 0.8;
+        for (let row = 0; row < rows; row++) {
+          const f = (row + 1) / rows, half = (g1 - g0) / 2 * (0.8 + 0.9 * f), xc = c + lean * f;
+          ctx.fillStyle = `rgba(255,222,140,${(fade * (0.34 - 0.27 * f)).toFixed(3)})`;
+          ctx.fillRect(Math.round(xc - half), top + row, Math.max(1, Math.round(half * 2)), 1);
         }
       }
     }
